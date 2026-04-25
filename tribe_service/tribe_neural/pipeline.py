@@ -28,6 +28,7 @@ from .constants import STEP_TRS_DEFAULT, WINDOW_TRS_DEFAULT
 from .init_resources import Resources
 from .logging_config import timed_step
 from .steps.step2_roi import extract_all
+from .steps.step2b_parcels import extract_parcels
 from .steps.step7_timeline import build_timeline
 from .validation import PipelineError, ValidationError
 
@@ -86,6 +87,27 @@ def process_video_timeline(
             roi_ts = extract_all(preds, resources.masks, resources.weight_maps)
             ctx["n_rois"] = len(roi_ts)
 
+        # ── Step 2b: per-parcel reduction (for cortical brain rendering) ──
+        # Optional: only runs if the Schaefer parcel map is loaded. The
+        # 8-ROI chart and Gemini synthesizer don't depend on this. When
+        # the map is missing, the frontend gracefully falls back to the
+        # placeholder brain. See ASSUMPTIONS_BRAIN.md §1.3 + §3.6.
+        parcel_series = None
+        if resources.parcels is not None:
+            with timed_step(log, "parcels", **log_extra) as ctx:
+                arr = extract_parcels(preds, resources.parcels)
+                # Cast to nested Python lists for JSON-friendly transport.
+                # Wire size: ~32 KB for a 30s clip — see ASSUMPTIONS_BRAIN.md §1.3.
+                parcel_series = arr.tolist()
+                ctx["n_trs"] = int(arr.shape[0])
+                ctx["n_parcels"] = int(arr.shape[1])
+        else:
+            log.info(
+                "skipping parcel extraction (no parcel map loaded) — "
+                "cortical brain will render placeholder",
+                extra={"step": "parcels", **log_extra},
+            )
+
         with timed_step(log, "timeline", **log_extra) as ctx:
             payload = build_timeline(
                 roi_ts,
@@ -94,6 +116,10 @@ def process_video_timeline(
             )
             ctx["n_frames"] = len(payload["frames"])
             ctx["n_windows"] = len(payload["windows"])
+
+        # Attach parcel_series to the payload alongside roi_series. None
+        # is allowed — schemas.py marks the field Optional.
+        payload["parcel_series"] = parcel_series
     except (ValidationError, PipelineError):
         raise
     except Exception as e:  # noqa: BLE001
