@@ -66,6 +66,12 @@ image = (
         "whisperx==3.1.1",
         "edge-tts>=6.1",
         "ffmpeg-python>=0.2",
+        # decord — fast video decoder used by the batched-encoding patch
+        # in tribe_runner.py to pre-decode the entire MP4 once instead of
+        # making 1,728 random-access moviepy seeks per request. C++ under
+        # the hood, ~50-100x faster than moviepy on whole-video reads.
+        # Patch falls back to moviepy if this import fails.
+        "decord>=0.6.0",
         # GPU
         "torch>=2.1",
         "torchaudio>=2.1",

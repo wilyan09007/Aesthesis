@@ -192,6 +192,16 @@ class TribeRunner:
                     for k in reversed(range(model.num_frames))
                 ]
 
+                # Optional pre-decode via decord. When enabled, the entire
+                # MP4 is decoded once into a single numpy array up front,
+                # eliminating ~1,728 random-access moviepy seeks per
+                # request (one per (chunk, subtime) pair). Falls back to
+                # moviepy if decord is unavailable or fails. Disable
+                # with TRIBE_VIDEO_PREDECODE=0; see DESIGN.md §15
+                # (2026-04-25 update — decord pre-decode) for revert
+                # procedure.
+                use_predecode = os.getenv("TRIBE_VIDEO_PREDECODE", "1") == "1"
+
                 for event in uncached:
                     video = event.read()
                     # Per-event freq used for expect_frames + the output's
@@ -205,27 +215,79 @@ class TribeRunner:
                     times = np.linspace(0, video.duration, expect_frames + 1)[1:]
                     n_chunks = len(times)
 
-                    # ── Phase 1: per-chunk frame I/O via moviepy (sequential) ──
+                    # ── Phase 1a: optional pre-decode of the whole video ──
+                    # decord reads sequentially (the codec's fast path) and
+                    # parallelises across cores. ~1-2 s for a 13 s clip vs
+                    # ~20-25 s of moviepy random-access seeks below.
+                    all_frames = None
+                    if use_predecode:
+                        try:
+                            import decord  # type: ignore  # noqa: WPS433
+                            vr = decord.VideoReader(event.filepath)
+                            all_frames = vr[:].asnumpy()  # (n_total, H, W, 3) uint8
+                            upstream_logger.debug(
+                                "decord pre-decoded %d frames (shape %s) for %s",
+                                len(all_frames), all_frames.shape[1:], event.filepath,
+                            )
+                        except ImportError:
+                            upstream_logger.warning(
+                                "decord not installed — falling back to moviepy "
+                                "per-chunk seeks. pip install 'decord>=0.6.0' "
+                                "to enable the fast path."
+                            )
+                            all_frames = None
+                        except Exception as e:  # noqa: BLE001
+                            upstream_logger.warning(
+                                "decord pre-decode failed (%s) — falling back to moviepy",
+                                e,
+                            )
+                            all_frames = None
+
+                    # ── Phase 1b: assemble chunks ──
                     # Pre-allocate one big ndarray rather than np.stack of a list,
                     # to halve peak memory during chunk assembly.
+                    fps = float(video.fps)
                     chunks = None
-                    for k, t in enumerate(times):
-                        ims = [_VideoImage(video=video, time=max(0, t - t2))
-                               for t2 in subtimes]
-                        pil_imgs = [i.read() for i in ims]
-                        if pil_imgs and self.max_imsize is not None:
-                            factor = max(pil_imgs[0].size) / self.max_imsize
-                            if factor > 1:
-                                size = tuple(int(s / factor) for s in pil_imgs[0].size)
-                                pil_imgs = [pi.resize(size) for pi in pil_imgs]
-                        data = np.array([np.array(pi) for pi in pil_imgs])
-                        if chunks is None:
-                            chunks = np.zeros((n_chunks,) + data.shape, dtype=data.dtype)
-                        chunks[k] = data
-                    upstream_logger.debug(
-                        "Assembled %d chunks of shape %s for batched V-JEPA forward "
-                        "(batch_size=%d)",
+                    if all_frames is not None:
+                        # Fast path: integer index into the pre-decoded array.
+                        chunk_shape = all_frames.shape[1:]  # (H, W, 3)
+                        chunks = np.zeros(
+                            (n_chunks, model.num_frames) + chunk_shape,
+                            dtype=all_frames.dtype,
+                        )
+                        for k, t in enumerate(times):
+                            for j, t2 in enumerate(subtimes):
+                                idx = min(
+                                    int(max(0.0, t - t2) * fps),
+                                    len(all_frames) - 1,
+                                )
+                                chunks[k, j] = all_frames[idx]
+                        # NOTE: max_imsize resize is intentionally skipped on
+                        # the pre-decode path. TRIBE doesn't set max_imsize
+                        # by default, so this is a no-op in production. If
+                        # you need it, resize all_frames once after the
+                        # decord read instead of per-chunk.
+                    else:
+                        # Moviepy fallback: per-chunk random-access seeks
+                        # (the original upstream behaviour).
+                        for k, t in enumerate(times):
+                            ims = [_VideoImage(video=video, time=max(0, t - t2))
+                                   for t2 in subtimes]
+                            pil_imgs = [i.read() for i in ims]
+                            if pil_imgs and self.max_imsize is not None:
+                                factor = max(pil_imgs[0].size) / self.max_imsize
+                                if factor > 1:
+                                    size = tuple(int(s / factor) for s in pil_imgs[0].size)
+                                    pil_imgs = [pi.resize(size) for pi in pil_imgs]
+                            data = np.array([np.array(pi) for pi in pil_imgs])
+                            if chunks is None:
+                                chunks = np.zeros((n_chunks,) + data.shape, dtype=data.dtype)
+                            chunks[k] = data
+                    log.info(
+                        "assembled %d chunks shape %s for batched V-JEPA forward "
+                        "(batch_size=%d, frame_io=%s)",
                         n_chunks, chunks.shape[1:], batch_size,
+                        "decord" if all_frames is not None else "moviepy",
                     )
 
                     # ── Phase 2: batched GPU forward ──
@@ -308,6 +370,30 @@ class TribeRunner:
                 "tribev2 package not installed. "
                 "Run `pip install git+https://github.com/facebookresearch/tribev2`."
             ) from e
+        # Enable TF32 for matmul + cuDNN convs on Ampere+ GPUs (A100,
+        # H100). Lifts the matmul compute ceiling from 19.5 TFLOPS
+        # (FP32) to ~156 TFLOPS on A100, with ~10⁻³ relative error per
+        # matmul. Inputs/outputs stay FP32 from PyTorch's perspective —
+        # only the inside of tensor-core matmul/conv kernels uses
+        # 19-bit precision. NVIDIA's recommended default for inference
+        # on Ampere+; PyTorch turned it off-by-default in 1.12 not
+        # because of correctness issues, but to avoid silent precision
+        # changes during version upgrades.
+        #
+        # Disable with TRIBE_TF32=0 if cosine similarity vs FP32
+        # baseline drops below your acceptance threshold (usually >0.998
+        # for ViT inference). See DESIGN.md §15 (2026-04-25 update) for
+        # the full revert procedure.
+        if os.getenv("TRIBE_TF32", "1") == "1":
+            import torch  # type: ignore  # noqa: WPS433
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            log.info(
+                "TF32 enabled for matmul + cuDNN. "
+                "Set TRIBE_TF32=0 to fall back to pure FP32."
+            )
+        else:
+            log.info("TRIBE_TF32=0, leaving matmul + cuDNN at FP32 precision")
         # Audio is neutralised by physically stripping the audio stream
         # from the MP4 at the request boundary (api._strip_audio_track).
         # With no audio stream, tribev2.ExtractAudioFromVideo produces

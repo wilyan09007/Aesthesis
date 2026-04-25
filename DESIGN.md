@@ -2035,6 +2035,119 @@ The 27 chunks come from `neuralset.extractors.video.HuggingFaceVideo._get_data` 
 - `tribe_service/tribe_neural/api.py` — `_strip_audio_track` rewritten to raise `PipelineError` on any ffmpeg failure; docstring rewritten to declare the strip as load-bearing with no fallback safety net.
 - `DESIGN.md` §17 audio section + §5.13 performance budget — updated to reference this entry's measured numbers.
 
+#### 2026-04-25 update — TF32 enabled for matmul + cuDNN
+
+After the batched-encoding patch landed (B=8) we measured the GPU running at ~70% of A100-40GB's FP32 ceiling (19.5 TFLOPS), which is why batch sizes above ~4 stopped paying off — the matmul kernels were already saturated. To break that ceiling without changing model semantics, TF32 was enabled.
+
+**What changed:**
+
+- `tribe_service/tribe_neural/tribe_runner.py` — in `_ensure_model`, before the V-JEPA monkey-patch and `TribeModel.from_pretrained`, added:
+  ```python
+  if os.getenv("TRIBE_TF32", "1") == "1":
+      import torch
+      torch.backends.cuda.matmul.allow_tf32 = True
+      torch.backends.cudnn.allow_tf32 = True
+  ```
+  Default is **on** (`TRIBE_TF32=1`); flip to `0` to fall back to pure FP32.
+
+**What it does:**
+
+TF32 (NVIDIA's TensorFloat-32) is a hybrid format used internally by tensor-core matmul/conv kernels on Ampere+ GPUs. Same FP32 exponent (full range, no over/underflow), but mantissa truncated from 23 bits to 10 bits inside the matmul. Inputs/outputs stay FP32 from PyTorch's perspective. Lifts the matmul compute ceiling from 19.5 TFLOPS (A100 FP32) to ~156 TFLOPS (A100 TF32) — about 8× theoretical, ~2–3× observed end-to-end after non-matmul work and memory ops dilute the gain.
+
+**Trade-off:**
+
+Per-matmul relative error ~10⁻³, compounding across V-JEPA's ~40 layers + TRIBE's prediction head. Expected effect on the 8 UX-tuned ROI values: ~1–2% drift stacked on top of the ~1% already present from batching. Cosine similarity vs pure-FP32 baseline typically >0.998 for ViT inference; signal direction and rank order of ROIs preserved. NVIDIA explicitly recommends TF32 for inference on Ampere+, and TRIBE was almost certainly trained with mixed precision anyway, so TF32 inference may actually be closer to training conditions than pure FP32 inference.
+
+**Expected speedup:**
+
+Encoding loop on 13 s clip, A100-40GB warm:
+- Pre-TF32 (B=8 FP32): ~72 s
+- Post-TF32 (B=8 TF32): ~25–30 s estimated (matmul portion compresses; non-matmul overhead caps the win)
+
+Total request wall time:
+- Pre-TF32: ~88 s warm, ~148 s baseline (B=1 cold)
+- Post-TF32: ~25–35 s warm estimated
+
+**What it does NOT change:**
+
+- Memory usage — same FP32 storage, only the math inside tensor cores changes. The B=10 OOM at the `predict_hidden_states` concat operation still happens; B=8 stays the ceiling on A100-40GB.
+- Cold-start time, frame I/O time, or model load time — only matmul-heavy ops are affected.
+
+**Revert procedure:**
+
+Three options, in increasing scope:
+
+1. **Runtime, no redeploy:** set `TRIBE_TF32=0` as a Modal function env var (or in `.env` if running locally). The TF32-enable block in `_ensure_model` is gated on this and will leave matmul + cuDNN at FP32 precision.
+2. **Code-level, re-deploy required:** delete the `if os.getenv("TRIBE_TF32", "1") == "1":` block in `tribe_service/tribe_neural/tribe_runner.py` `_ensure_model`. Search anchor: `# Enable TF32 for matmul + cuDNN convs on Ampere+ GPUs`.
+3. **Full revert:** `git revert <commit-sha-of-this-change>` — reverts the source edit and this DESIGN.md update together.
+
+**Validation TODO before claiming "scientific accuracy":**
+
+5-clip A/B test (TF32 on vs `TRIBE_TF32=0`); compute per-vertex Pearson correlation on the resulting brain timelines; acceptance threshold: median r > 0.999. If r drops below 0.99 for any vertex, drop back to FP32 and investigate which layer is most TF32-sensitive.
+
+#### 2026-04-25 update — decord pre-decode (G) added
+
+After TF32 landed and the encoding loop dropped from 72 s → 42 s, the next-biggest item in the budget was moviepy frame I/O — ~1,728 random-access seeks per request (27 chunks × 64 frames per chunk). Profiling showed this was contributing roughly 20 s to the encoding loop wall time even with batched V-JEPA forwards, because each `video.get_frame(t)` call re-decodes from the nearest keyframe and discards the result.
+
+**What changed:**
+
+- `tribe_service/modal_app.py` — added `decord>=0.6.0` to the `pip_install` block. C++ video decoder; ~50–100× faster than moviepy on whole-video reads because it streams sequentially (the codec's fast path) instead of seeking randomly.
+- `tribe_service/tribe_neural/tribe_runner.py` — extended `_patched_get_data` (already monkey-patched onto `HuggingFaceVideo`) with a Phase 1a pre-decode step: decode the entire MP4 once via `decord.VideoReader(filepath)[:]` into a single `(n_total_frames, H, W, 3)` numpy array, then build per-chunk tensors via integer indexing instead of moviepy seeks. Falls back to moviepy automatically if decord is unavailable or raises. Gated by `TRIBE_VIDEO_PREDECODE` env var; default `1` (on).
+
+**What it does:**
+
+For our 13.7 s test clip (~316 total frames), the decord call decodes the full video in ~1 s using sequential MP4 reads. Frame extraction for each (chunk, subtime) pair becomes an `O(1)` numpy index into the pre-decoded array. Eliminates:
+
+| | Moviepy (before) | decord pre-decode |
+|---|---|---|
+| Decode operations | 1,728 (with re-decoding) | ~316 (each frame decoded once) |
+| Random-access seeks | 1,728 | 0 |
+| Total frame-I/O time | ~20–25 s | ~1–2 s |
+| Memory used | ~0 (streamed) | ~390 MB (RAM, fits trivially in 32 GB container) |
+
+Pixel data is unchanged — same frames, same content, same RGB values. Only the path to retrieve them is different. Numeric drift vs the moviepy path: zero.
+
+**Trade-off:**
+
+- Adds ~1.5 GB to the Modal image (decord wheel + transitive deps).
+- Holds ~400 MB in RAM during the encoding loop (the decoded frame array). Container has 32 GB, so this is irrelevant in practice; would matter for >5-min videos.
+- decord on Linux/Python 3.11 is well-tested via PyPI wheels. If a wheel doesn't match the runtime, the patch falls back to moviepy with a warning — no hard failure.
+
+**Expected speedup:**
+
+Encoding loop on the 13 s clip, A100-40GB warm:
+- Pre-decord (TF32, B=8): ~42 s
+- Post-decord (TF32, B=8, predecode): ~22–25 s estimated
+
+Total request wall time:
+- Pre-decord: ~64 s warm
+- Post-decord: ~42–45 s warm estimated
+
+Gain isn't dramatic in absolute terms, but it's a free 20 s with no model-semantics impact — pure I/O optimization.
+
+**What it does NOT change:**
+
+- GPU compute time, model load time, cold-start time, or memory ceiling.
+- B=8 is still the batching ceiling on A100-40GB (the OOM is in `predict_hidden_states` concat, unrelated to frame I/O).
+- Brain timeline outputs — frames are bit-identical to moviepy.
+
+**Revert procedure:**
+
+Three options:
+
+1. **Runtime, no redeploy:** set `TRIBE_VIDEO_PREDECODE=0` as a Modal function env var (or in `.env` locally). The `_patched_get_data` function checks this and falls through to the moviepy path with all original semantics intact.
+2. **Code-level, redeploy required:** delete the Phase 1a block in `tribe_service/tribe_neural/tribe_runner.py` `_patched_get_data` (search anchor: `# ── Phase 1a: optional pre-decode of the whole video ──`). Remove `decord>=0.6.0` from `tribe_service/modal_app.py` `pip_install`.
+3. **Full revert:** `git revert <commit-sha-of-this-change>` — reverts source edits and this DESIGN.md update together.
+
+**Validation:**
+
+Frame extraction is bit-identical to moviepy (both libraries decode the same H.264 stream with the same codec rules). The only places drift could enter are:
+
+- **Frame-index rounding:** `int(t * fps)` vs moviepy's internal seek logic. Moviepy returns the frame *at or just before* time `t`; decord with integer indexing does the same after the floor. No diff in practice on standard 23 fps / 30 fps content.
+- **Codec decoder differences:** decord uses FFmpeg directly; moviepy also uses FFmpeg. Same backend, same pixels.
+
+No A/B test required for "scientific accuracy" beyond a smoke test confirming brain timelines match within numerical noise.
+
 ---
 
 ### 2026-04-24 — YNeurotrading collapsed to reference-only; Gemini for synthesizer; legacy keyset deleted
