@@ -1,4 +1,4 @@
-// Wire types — 1:1 mirror of aesthesis_app/aesthesis/schemas.py.
+// Wire types — 1:1 mirror of backend/aesthesis/schemas.py.
 // The Pydantic schema is the single source of truth. If you change a field
 // here without changing it there (or vice versa), the request will fail
 // loudly the first time it hits the network.

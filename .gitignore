@@ -48,7 +48,7 @@ modal-secrets.toml
 .claude/
 
 # Per-request upload dirs (runtime artifacts, never commit)
-aesthesis_app/uploads/
+backend/uploads/
 
 # Test videos (too large for git; commit-ignored even if present in worktree)
 *.mp4

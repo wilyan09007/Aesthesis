@@ -3,8 +3,8 @@
 #
 # Three layers:
 #   - TRIBE     (Modal serverless at $TRIBE_SERVICE_URL)  — tribe_service/modal_app.py
-#   - backend   (FastAPI, http://127.0.0.1:8000)          — aesthesis_app/aesthesis/main.py
-#   - frontend  (Next.js, http://localhost:3000)          — aesthesis-app/
+#   - backend   (FastAPI, http://127.0.0.1:8000)          — backend/aesthesis/main.py
+#   - frontend  (Next.js, http://localhost:3000)          — frontend/
 #
 # Modal note: TRIBE doesn't run locally and isn't "started" by this script.
 # Once `modal deploy tribe_service/modal_app.py` has been run, the app sits
@@ -61,13 +61,13 @@ fi
 # don't run main.py's module-level logging (CORS configured, etc.) here —
 # uvicorn will run the real import and log it once when the server starts.
 if ! python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('aesthesis.main') else 1)" 2>/dev/null; then
-    echo "[dev] backend package not installed; running 'pip install -e aesthesis_app/'…"
-    pip install -e aesthesis_app/ >/dev/null
+    echo "[dev] backend package not installed; running 'pip install -e backend/'…"
+    pip install -e backend/ >/dev/null
 fi
 
-if [[ ! -d aesthesis-app/node_modules ]]; then
+if [[ ! -d frontend/node_modules ]]; then
     echo "[dev] frontend deps missing; running 'npm install'…"
-    (cd aesthesis-app && npm install)
+    (cd frontend && npm install)
 fi
 
 # Refuse to start if either port is already in use. Avoids the confusing
@@ -108,7 +108,7 @@ python -m uvicorn aesthesis.main:app --host 127.0.0.1 --port 8000 &
 PIDS+=($!)
 
 echo "[dev] starting frontend → http://localhost:3000"
-(cd aesthesis-app && npm run dev) &
+(cd frontend && npm run dev) &
 PIDS+=($!)
 
 echo "[dev] both up. Ctrl-C to stop both."

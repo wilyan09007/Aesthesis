@@ -6,6 +6,7 @@ import VideoPlayer from "./VideoPlayer"
 import BrainChart from "./BrainChart"
 import InsightCard from "./InsightCard"
 import OverallAssessmentPanel from "./OverallAssessmentPanel"
+import AuthButton from "./AuthButton"
 import type { Frame, ROIValues } from "@/lib/types"
 import type { ResultsViewData } from "@/lib/adapt"
 
@@ -15,6 +16,10 @@ interface ResultsViewProps {
   data: ResultsViewData
   videoFile: File | null
   onReset: () => void
+  savedRunId?: string | null
+  saveStatus?: "idle" | "saving" | "saved" | "error"
+  onSave?: () => Promise<string>
+  onHistoryOpen?: () => void
 }
 
 function getCurrentROI(frames: Frame[], currentTime: number): ROIValues | undefined {
@@ -28,7 +33,7 @@ function getCurrentROI(frames: Frame[], currentTime: number): ROIValues | undefi
   return closest.values
 }
 
-export default function ResultsView({ data, videoFile, onReset }: ResultsViewProps) {
+export default function ResultsView({ data, videoFile, onReset, savedRunId, saveStatus = "idle", onSave, onHistoryOpen }: ResultsViewProps) {
   const [currentTime, setCurrentTime] = useState(0)
   const currentROI = useMemo(() => getCurrentROI(data.frames, currentTime), [data.frames, currentTime])
 
@@ -52,19 +57,75 @@ export default function ResultsView({ data, videoFile, onReset }: ResultsViewPro
           </span>
         </div>
 
-        <button
-          onClick={onReset}
-          className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs transition-colors"
-          style={{ color: "rgba(255,255,255,0.4)", border: "1px solid rgba(255,255,255,0.08)" }}
-          onMouseEnter={e => (e.currentTarget.style.color = "#e8eaf0")}
-          onMouseLeave={e => (e.currentTarget.style.color = "rgba(255,255,255,0.4)")}
-        >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M3 12a9 9 0 109-9 9.75 9.75 0 00-6.74 2.74L3 8" />
-            <path d="M3 3v5h5" />
-          </svg>
-          New Analysis
-        </button>
+        <div className="flex items-center gap-2">
+          {onHistoryOpen && (
+            <button
+              onClick={onHistoryOpen}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs transition-colors"
+              style={{ color: "rgba(255,255,255,0.4)", border: "1px solid rgba(255,255,255,0.08)" }}
+              onMouseEnter={e => (e.currentTarget.style.color = "#e8eaf0")}
+              onMouseLeave={e => (e.currentTarget.style.color = "rgba(255,255,255,0.4)")}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <path d="M3 12a9 9 0 109-9 9.75 9.75 0 00-6.74 2.74L3 8" />
+                <path d="M3 3v5h5" />
+              </svg>
+              History
+            </button>
+          )}
+
+          {onSave && (
+            <button
+              onClick={() => { if (saveStatus === "idle" || saveStatus === "error") onSave().catch(() => {}) }}
+              disabled={saveStatus === "saving" || saveStatus === "saved"}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all"
+              style={{
+                background: saveStatus === "saved"
+                  ? "rgba(92,242,197,0.1)"
+                  : "rgba(124,156,255,0.1)",
+                border: `1px solid ${saveStatus === "saved" ? "rgba(92,242,197,0.25)" : "rgba(124,156,255,0.25)"}`,
+                color: saveStatus === "saved"
+                  ? "#5CF2C5"
+                  : saveStatus === "error"
+                    ? "#FF6B6B"
+                    : saveStatus === "saving"
+                      ? "rgba(255,255,255,0.4)"
+                      : "#7C9CFF",
+                cursor: saveStatus === "saving" || saveStatus === "saved" ? "default" : "pointer",
+              }}
+            >
+              {saveStatus === "saving" && (
+                <motion.div className="w-3 h-3 rounded-full border border-current border-t-transparent"
+                  animate={{ rotate: 360 }} transition={{ duration: 0.8, repeat: Infinity, ease: "linear" }} />
+              )}
+              {saveStatus === "saved" && (
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                  <path d="M20 6L9 17l-5-5" />
+                </svg>
+              )}
+              {saveStatus === "idle" && (
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z" />
+                  <polyline points="17 21 17 13 7 13 7 21" />
+                  <polyline points="7 3 7 8 15 8" />
+                </svg>
+              )}
+              {saveStatus === "saving" ? "Saving…" : saveStatus === "saved" ? "Saved" : saveStatus === "error" ? "Retry" : "Save"}
+            </button>
+          )}
+
+          <button
+            onClick={onReset}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs transition-colors"
+            style={{ color: "rgba(255,255,255,0.4)", border: "1px solid rgba(255,255,255,0.08)" }}
+            onMouseEnter={e => (e.currentTarget.style.color = "#e8eaf0")}
+            onMouseLeave={e => (e.currentTarget.style.color = "rgba(255,255,255,0.4)")}
+          >
+            New Analysis
+          </button>
+
+          <AuthButton />
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto">

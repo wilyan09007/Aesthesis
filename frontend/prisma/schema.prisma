@@ -1,0 +1,81 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  auth0Id   String   @unique
+  email     String   @unique
+  name      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  runs      Run[]
+}
+
+enum RunStatus {
+  PENDING
+  PROCESSING
+  COMPLETE
+  FAILED
+}
+
+model Run {
+  id        String     @id @default(cuid())
+  userId    String
+  user      User       @relation(fields: [userId], references: [id])
+  status    RunStatus  @default(PENDING)
+  goal      String?
+  urlA      String?
+  urlB      String?
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  versions  RunVersion[]
+  summary   RunSummary?
+  insights  RunInsight[]
+
+  @@index([userId, createdAt(sort: Desc)])
+}
+
+model RunVersion {
+  id        String   @id @default(cuid())
+  runId     String
+  run       Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  version   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([runId, version])
+  @@index([runId])
+}
+
+model RunSummary {
+  id          String   @id @default(cuid())
+  runId       String   @unique
+  run         Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  winner      String
+  summaryText String
+  avgRoiA     Json
+  avgRoiB     Json
+  // pgvector-ready: add `roiEmbedding Unsupported("vector(16)")?` here in v2
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model RunInsight {
+  id             String   @id @default(cuid())
+  runId          String
+  run            Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  version        String
+  timestampStart Float
+  timestampEnd   Float
+  uxObservation  String
+  recommendation String
+  createdAt      DateTime @default(now())
+
+  @@index([runId, version])
+}

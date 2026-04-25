@@ -7,9 +7,9 @@ authors = [{ name = "William" }]
 readme = "README.md"
 
 # Top-level pyproject is intentionally a workspace stub. The two services
-# (tribe_service and aesthesis_app) each have their own pyproject.toml with
+# (tribe_service and backend) each have their own pyproject.toml with
 # concrete dependency sets — TRIBE pulls in torch + tribev2 + nilearn + arq;
-# aesthesis_app pulls in fastapi + ffmpeg-python + google-generativeai.
+# backend pulls in fastapi + ffmpeg-python + google-generativeai.
 #
 # Shared dev tooling lives here so a single `pip install -e ".[dev]"` from the
 # repo root sets up tests against both packages.
@@ -45,5 +45,5 @@ build-backend = "setuptools.build_meta"
 package-dir = { "" = "." }
 
 [tool.setuptools.packages.find]
-where = ["tribe_service", "aesthesis_app"]
+where = ["tribe_service", "backend"]
 include = ["tribe_neural*", "aesthesis*"]

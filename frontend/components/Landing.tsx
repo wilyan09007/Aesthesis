@@ -2,6 +2,7 @@
 
 import { lazy, Suspense } from "react"
 import { motion } from "framer-motion"
+import AuthButton from "./AuthButton"
 
 const Brain3D = lazy(() => import("./Brain3D"))
 
@@ -90,10 +91,12 @@ export default function Landing({ onCaptureAndAssess, onSkipToAssess }: LandingP
           </div>
           <span className="text-sm font-medium tracking-wide" style={{ color: "#e8eaf0" }}>Aesthesis</span>
         </div>
-        <div className="flex items-center gap-1 text-xs" style={{ color: "rgba(255,255,255,0.3)" }}>
-          <span>Powered by</span>
-          <span className="font-medium" style={{ color: "rgba(255,255,255,0.5)" }}>TRIBE v2</span>
-          <span>· Meta AI Research</span>
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-1 text-xs" style={{ color: "rgba(255,255,255,0.3)" }}>
+            <span>Powered by</span>
+            <span className="font-medium" style={{ color: "rgba(255,255,255,0.5)" }}>TRIBE v2</span>
+          </div>
+          <AuthButton />
         </div>
       </nav>
 
