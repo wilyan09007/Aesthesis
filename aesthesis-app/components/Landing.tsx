@@ -28,7 +28,7 @@ const FEATURES = [
       </svg>
     ),
     title: "Timestamped clarity",
-    body: "Every observation anchors to a specific second. Click it on the timeline — both videos seek.",
+    body: "Every observation anchors to a specific second. Click it on the timeline — the video seeks there.",
   },
   {
     icon: (
@@ -38,16 +38,16 @@ const FEATURES = [
         <line x1="12" y1="17" x2="12" y2="21" />
       </svg>
     ),
-    title: "Autonomous capture",
-    body: "Feed it two URLs. Browser agents demo each experience, record, encode, and deliver a verdict.",
+    title: "Demo anything",
+    body: "Drop any screen recording — landing page, signup flow, dashboard, mobile app. The pipeline reads it.",
   },
 ]
 
 const STEPS = [
-  { n: "01", title: "Input", body: "Enter two URLs or upload MP4 recordings directly." },
-  { n: "02", title: "Capture", body: "Autonomous agents navigate and record each experience." },
+  { n: "01", title: "Input", body: "Enter a URL or upload an MP4 of your demo." },
+  { n: "02", title: "Capture", body: "Autonomous agents navigate and record the experience (or skip if you have a recording)." },
   { n: "03", title: "Encode", body: "TRIBE v2 predicts neural response per second of footage." },
-  { n: "04", title: "Verdict", body: "Read timestamped insights and a head-to-head verdict." },
+  { n: "04", title: "Read", body: "Timestamped insights, neural metrics, and an overall assessment." },
 ]
 
 export default function Landing({ onCaptureAndAssess, onSkipToAssess }: LandingProps) {
@@ -110,24 +110,24 @@ export default function Landing({ onCaptureAndAssess, onSkipToAssess }: LandingP
             <div className="inline-flex items-center gap-2 mb-7 px-3 py-1 rounded-full text-[11px] tracking-widest uppercase"
               style={{ background: "rgba(124,156,255,0.08)", border: "1px solid rgba(124,156,255,0.2)", color: "#7C9CFF" }}>
               <span className="w-1 h-1 rounded-full inline-block" style={{ background: "#7C9CFF" }} />
-              Neural A/B Intelligence
+              Neural UX intelligence
             </div>
 
             <h1 className="font-light leading-[1.08] tracking-tight mb-6"
               style={{ fontSize: "clamp(3rem, 5vw, 4.25rem)", color: "#e8eaf0" }}>
-              The brain<br />
+              Demo anything.<br />
               <span style={{
                 background: "linear-gradient(135deg, #7C9CFF 0%, #5CF2C5 100%)",
                 WebkitBackgroundClip: "text",
                 WebkitTextFillColor: "transparent",
                 backgroundClip: "text",
               }}>
-                doesn&apos;t lie.
+                See the analysis.
               </span>
             </h1>
 
             <p className="text-base leading-relaxed max-w-md" style={{ color: "rgba(255,255,255,0.52)" }}>
-              Aesthesis runs autonomous A/B comparisons through a simulated neural response — derived from TRIBE v2, Meta&apos;s foundation model trained on 451 hours of fMRI data from 720+ humans. Not surveys. Not heatmaps. Exactly which moment each experience wins or loses, timestamped to the second.
+              Aesthesis reads any screen recording through a simulated neural response — derived from TRIBE v2, Meta&apos;s foundation model trained on 451 hours of fMRI data from 720+ humans. Not surveys. Not heatmaps. Exactly when attention, friction, and intent fired, timestamped to the second.
             </p>
           </motion.div>
 
@@ -193,7 +193,7 @@ export default function Landing({ onCaptureAndAssess, onSkipToAssess }: LandingP
                 <polyline points="17 8 12 3 7 8" />
                 <line x1="12" y1="3" x2="12" y2="15" />
               </svg>
-              Upload MP4s
+              Upload MP4
             </motion.button>
           </motion.div>
         </div>
@@ -319,7 +319,7 @@ export default function Landing({ onCaptureAndAssess, onSkipToAssess }: LandingP
         >
           <LandingCard
             label="Capture &amp; Assess"
-            description="Enter two URLs. We autonomously demo each experience and record the session for analysis."
+            description="Enter a URL. We autonomously demo the experience and record the session for analysis."
             badge="Full pipeline"
             badgeColor="#7C9CFF"
             glowColor="rgba(124,156,255,0.12)"
@@ -334,7 +334,7 @@ export default function Landing({ onCaptureAndAssess, onSkipToAssess }: LandingP
           />
           <LandingCard
             label="Skip to Assess"
-            description="Already have MP4 recordings? Upload them directly and get instant neural analysis."
+            description="Already have an MP4 recording? Upload it directly and get instant neural analysis."
             badge="Upload path"
             badgeColor="#5CF2C5"
             glowColor="rgba(92,242,197,0.10)"

@@ -6,12 +6,13 @@ import type { WSMessage } from "@/lib/types"
 
 interface LiveStreamPanelProps {
   runId: string
-  version: "A" | "B"
 }
 
 type FpsTier = "low" | "medium" | "high"
 
-export default function LiveStreamPanel({ runId, version }: LiveStreamPanelProps) {
+const ACCENT = "#7C9CFF"
+
+export default function LiveStreamPanel({ runId }: LiveStreamPanelProps) {
   const imgRef = useRef<HTMLImageElement>(null)
   const [degraded, setDegraded] = useState(false)
   const [connected, setConnected] = useState(false)
@@ -27,7 +28,7 @@ export default function LiveStreamPanel({ runId, version }: LiveStreamPanelProps
     ws.onmessage = (e) => {
       const msg: WSMessage = JSON.parse(e.data)
 
-      if (msg.type === "frame" && msg.version === version) {
+      if (msg.type === "frame") {
         if (imgRef.current) {
           imgRef.current.src = `data:image/jpeg;base64,${msg.frame_b64}`
         }
@@ -42,7 +43,7 @@ export default function LiveStreamPanel({ runId, version }: LiveStreamPanelProps
         if (degraded) setDegraded(false)
       }
 
-      if (msg.type === "stream_degraded" && msg.version === version) {
+      if (msg.type === "stream_degraded") {
         setDegraded(true)
       }
     }
@@ -51,19 +52,19 @@ export default function LiveStreamPanel({ runId, version }: LiveStreamPanelProps
     ws.onclose = () => setConnected(false)
 
     return () => ws.close()
-  }, [runId, version, degraded])
+  }, [runId, degraded])
 
   const fpsTier: FpsTier = fps >= 8 ? "high" : fps >= 4 ? "medium" : "low"
   const fpsTierColor = fpsTier === "high" ? "#5CF2C5" : fpsTier === "medium" ? "#FBBF24" : "#FF6B6B"
 
   return (
-    <div className="relative flex-1 rounded-xl overflow-hidden aspect-video panel">
+    <div className="relative rounded-xl overflow-hidden aspect-video panel">
       {/* Stream header */}
       <div className="absolute top-3 left-3 right-3 flex items-center justify-between z-20">
         <div className="flex items-center gap-2 px-2.5 py-1 rounded-full text-xs font-medium"
           style={{ background: "rgba(0,0,0,0.5)", backdropFilter: "blur(8px)", border: "1px solid rgba(255,255,255,0.08)" }}>
-          <span style={{ color: "rgba(255,255,255,0.5)" }}>Version</span>
-          <span style={{ color: version === "A" ? "#7C9CFF" : "#5CF2C5" }}>{version}</span>
+          <span className="w-1.5 h-1.5 rounded-full" style={{ background: ACCENT }} />
+          <span style={{ color: ACCENT }}>Live</span>
         </div>
 
         <div className="flex items-center gap-2">
@@ -81,7 +82,7 @@ export default function LiveStreamPanel({ runId, version }: LiveStreamPanelProps
       {/* Image frame */}
       <img
         ref={imgRef}
-        alt={`Live stream version ${version}`}
+        alt="Live demo stream"
         className="w-full h-full object-cover"
         style={{ display: connected ? "block" : "none" }}
       />
@@ -92,7 +93,7 @@ export default function LiveStreamPanel({ runId, version }: LiveStreamPanelProps
           <div className="text-center">
             <motion.div
               className="w-8 h-8 rounded-full mx-auto mb-3"
-              style={{ border: "2px solid rgba(124,156,255,0.3)", borderTopColor: "#7C9CFF" }}
+              style={{ border: "2px solid rgba(124,156,255,0.3)", borderTopColor: ACCENT }}
               animate={{ rotate: 360 }}
               transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
             />

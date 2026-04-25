@@ -1,0 +1,23 @@
+# Aesthesis app backend dependencies.
+# CPU-only — orchestrator HTTP-talks to the GPU TRIBE service.
+
+# Service plumbing
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.5
+python-multipart>=0.0.9
+
+# HTTP client to TRIBE service
+httpx>=0.27
+
+# Video validation + screenshot extraction
+ffmpeg-python>=0.2
+
+# LLM
+google-generativeai>=0.7
+
+# Numerics (event extraction operates on roi timeseries arrays)
+numpy>=1.26
+
+# Utilities
+python-dotenv>=1.0

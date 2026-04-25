@@ -1,0 +1,21 @@
+[project]
+name = "tribe-neural"
+version = "0.1.0.0"
+description = "Aesthesis TRIBE v2 GPU service: video MP4 -> per-TR brain timeline + windowed composites."
+requires-python = ">=3.10"
+
+# Heavy deps (torch, tribev2, nilearn, whisperx) live in requirements-tribe.txt
+# at the repo root and are only needed inside the GPU container.
+dependencies = [
+    "fastapi>=0.110",
+    "pydantic>=2.5",
+    "numpy>=1.26",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tribe_neural*"]

@@ -3,20 +3,18 @@
 import { useEffect, useRef } from "react"
 import { motion } from "framer-motion"
 
-interface VideoPlayerSyncedProps {
-  version: "A" | "B"
+interface VideoPlayerProps {
   file: File | null
   currentTime: number
   onTimeUpdate: (t: number) => void
-  isPrimary?: boolean
 }
 
-export default function VideoPlayerSynced({ version, file, currentTime, onTimeUpdate, isPrimary }: VideoPlayerSyncedProps) {
+const ACCENT = "#7C9CFF"
+
+export default function VideoPlayer({ file, currentTime, onTimeUpdate }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const isSeekingRef = useRef(false)
   const objectUrl = useRef<string | null>(null)
-
-  const accent = version === "A" ? "#7C9CFF" : "#5CF2C5"
 
   useEffect(() => {
     if (!file) return
@@ -35,7 +33,7 @@ export default function VideoPlayerSynced({ version, file, currentTime, onTimeUp
   }, [currentTime])
 
   const handleTimeUpdate = () => {
-    if (!videoRef.current || !isPrimary) return
+    if (!videoRef.current) return
     isSeekingRef.current = false
     onTimeUpdate(videoRef.current.currentTime)
   }
@@ -48,17 +46,8 @@ export default function VideoPlayerSynced({ version, file, currentTime, onTimeUp
     <div className="flex-1 rounded-xl overflow-hidden panel flex flex-col">
       {/* Header */}
       <div className="flex items-center gap-2 px-4 py-3" style={{ borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
-        <div className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-semibold"
-          style={{ background: `${accent}18`, color: accent }}>
-          {version}
-        </div>
-        <span className="text-sm font-medium" style={{ color: "#e8eaf0" }}>Version {version}</span>
-        {isPrimary && (
-          <span className="ml-auto text-xs px-2 py-0.5 rounded"
-            style={{ background: "rgba(255,255,255,0.06)", color: "rgba(255,255,255,0.35)" }}>
-            Primary
-          </span>
-        )}
+        <div className="w-2 h-2 rounded-full" style={{ background: ACCENT }} />
+        <span className="text-sm font-medium" style={{ color: "#e8eaf0" }}>Demo recording</span>
       </div>
 
       {/* Video */}
@@ -77,11 +66,11 @@ export default function VideoPlayerSynced({ version, file, currentTime, onTimeUp
             <div className="text-center">
               <motion.div
                 className="text-5xl font-light mb-3"
-                style={{ color: `${accent}20` }}
+                style={{ color: `${ACCENT}20` }}
                 animate={{ opacity: [0.4, 0.7, 0.4] }}
                 transition={{ duration: 3, repeat: Infinity }}
               >
-                {version}
+                ·
               </motion.div>
               <p className="text-xs" style={{ color: "rgba(255,255,255,0.2)" }}>No video</p>
             </div>

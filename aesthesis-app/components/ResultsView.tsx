@@ -2,21 +2,22 @@
 
 import { useState, useMemo, lazy, Suspense } from "react"
 import { motion } from "framer-motion"
-import VideoPlayerSynced from "./VideoPlayerSynced"
+import VideoPlayer from "./VideoPlayer"
 import BrainChart from "./BrainChart"
 import InsightCard from "./InsightCard"
-import VerdictPanel from "./VerdictPanel"
-import type { AnalyzeResponse, VideoFiles, ROIValues } from "@/lib/types"
+import OverallAssessmentPanel from "./OverallAssessmentPanel"
+import type { Frame, ROIValues } from "@/lib/types"
+import type { ResultsViewData } from "@/lib/adapt"
 
 const Brain3D = lazy(() => import("./Brain3D"))
 
 interface ResultsViewProps {
-  data: AnalyzeResponse
-  videoFiles: VideoFiles
+  data: ResultsViewData
+  videoFile: File | null
   onReset: () => void
 }
 
-function getCurrentROI(frames: { t_s: number; values: ROIValues }[], currentTime: number): ROIValues | undefined {
+function getCurrentROI(frames: Frame[], currentTime: number): ROIValues | undefined {
   if (!frames.length) return undefined
   let closest = frames[0]
   for (const f of frames) {
@@ -27,12 +28,9 @@ function getCurrentROI(frames: { t_s: number; values: ROIValues }[], currentTime
   return closest.values
 }
 
-export default function ResultsView({ data, videoFiles, onReset }: ResultsViewProps) {
+export default function ResultsView({ data, videoFile, onReset }: ResultsViewProps) {
   const [currentTime, setCurrentTime] = useState(0)
-  const [activeVersion, setActiveVersion] = useState<"A" | "B">("A")
-
-  const activeFrames = activeVersion === "A" ? data.a.frames : data.b.frames
-  const currentROI = useMemo(() => getCurrentROI(activeFrames, currentTime), [activeFrames, currentTime])
+  const currentROI = useMemo(() => getCurrentROI(data.frames, currentTime), [data.frames, currentTime])
 
   const handleSeek = (t: number) => setCurrentTime(t)
 
@@ -71,18 +69,16 @@ export default function ResultsView({ data, videoFiles, onReset }: ResultsViewPr
 
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-6xl mx-auto px-8 py-8 flex flex-col gap-8">
-          {/* Top: video players + brain */}
+          {/* Top: video player + 3D brain */}
           <motion.section
             className="flex gap-5 items-stretch"
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
           >
-            <VideoPlayerSynced
-              version="A"
-              file={videoFiles.a}
+            <VideoPlayer
+              file={videoFile}
               currentTime={currentTime}
               onTimeUpdate={handleSeek}
-              isPrimary={true}
             />
 
             {/* Brain 3D centerpiece */}
@@ -90,30 +86,10 @@ export default function ResultsView({ data, videoFiles, onReset }: ResultsViewPr
               <Suspense fallback={<BrainFallback />}>
                 <Brain3D roiValues={currentROI} size={220} />
               </Suspense>
-              {/* Version toggle */}
-              <div className="flex rounded-lg overflow-hidden text-xs"
-                style={{ border: "1px solid rgba(255,255,255,0.08)" }}>
-                {(["A", "B"] as const).map((v) => (
-                  <button key={v} onClick={() => setActiveVersion(v)}
-                    className="px-3 py-1.5 transition-all"
-                    style={{
-                      background: activeVersion === v ? "rgba(124,156,255,0.15)" : "transparent",
-                      color: activeVersion === v ? "#7C9CFF" : "rgba(255,255,255,0.3)",
-                      borderRight: v === "A" ? "1px solid rgba(255,255,255,0.08)" : "none",
-                    }}>
-                    {v}
-                  </button>
-                ))}
-              </div>
+              <p className="text-xs" style={{ color: "rgba(255,255,255,0.35)" }}>
+                Neural state at {currentTime.toFixed(1)}s
+              </p>
             </div>
-
-            <VideoPlayerSynced
-              version="B"
-              file={videoFiles.b}
-              currentTime={currentTime}
-              onTimeUpdate={() => {}}
-              isPrimary={false}
-            />
           </motion.section>
 
           {/* Middle: Brain chart */}
@@ -123,55 +99,44 @@ export default function ResultsView({ data, videoFiles, onReset }: ResultsViewPr
             transition={{ delay: 0.1 }}
           >
             <BrainChart
-              framesA={data.a.frames}
-              framesB={data.b.frames}
-              insightsA={data.a.insights}
-              insightsB={data.b.insights}
+              frames={data.frames}
+              insights={data.insights}
               currentTime={currentTime}
               onSeek={handleSeek}
             />
           </motion.section>
 
-          {/* Bottom: Insights + Verdict — secondary reference */}
+          {/* Bottom: Insights + Assessment */}
           <motion.section
             className="grid grid-cols-3 gap-6"
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.15 }}
           >
-            {/* Insights A */}
-            <div className="panel rounded-2xl p-5 flex flex-col gap-4" style={{ opacity: 0.85 }}>
+            {/* Insight cards — 2 cols */}
+            <div className="col-span-2 panel rounded-2xl p-5 flex flex-col gap-4">
               <div className="flex items-center gap-2">
-                <div className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-semibold"
-                  style={{ background: "rgba(124,156,255,0.15)", color: "#7C9CFF" }}>A</div>
-                <h3 className="text-sm font-medium" style={{ color: "#e8eaf0" }}>Insights — A</h3>
-                <span className="ml-auto text-[10px] tracking-wide" style={{ color: "rgba(255,255,255,0.2)" }}>reference</span>
+                <div className="w-2 h-2 rounded-full" style={{ background: "#7C9CFF" }} />
+                <h3 className="text-sm font-medium" style={{ color: "#e8eaf0" }}>Timestamped insights</h3>
+                <span className="ml-auto text-[10px] tracking-wide" style={{ color: "rgba(255,255,255,0.3)" }}>
+                  {data.insights.length} moment{data.insights.length === 1 ? "" : "s"}
+                </span>
               </div>
-              <div className="flex flex-col gap-3">
-                {data.a.insights.map((insight, i) => (
-                  <InsightCard key={i} insight={insight} index={i} version="A" onSeek={handleSeek} />
+              <div className="grid grid-cols-2 gap-3">
+                {data.insights.map((insight, i) => (
+                  <InsightCard key={i} insight={insight} index={i} onSeek={handleSeek} />
                 ))}
+                {data.insights.length === 0 && (
+                  <p className="text-xs col-span-2" style={{ color: "rgba(255,255,255,0.35)" }}>
+                    No notable moments detected. The demo may be too short or too uniform.
+                  </p>
+                )}
               </div>
             </div>
 
-            {/* Insights B */}
-            <div className="panel rounded-2xl p-5 flex flex-col gap-4" style={{ opacity: 0.85 }}>
-              <div className="flex items-center gap-2">
-                <div className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-semibold"
-                  style={{ background: "rgba(92,242,197,0.15)", color: "#5CF2C5" }}>B</div>
-                <h3 className="text-sm font-medium" style={{ color: "#e8eaf0" }}>Insights — B</h3>
-                <span className="ml-auto text-[10px] tracking-wide" style={{ color: "rgba(255,255,255,0.2)" }}>reference</span>
-              </div>
-              <div className="flex flex-col gap-3">
-                {data.b.insights.map((insight, i) => (
-                  <InsightCard key={i} insight={insight} index={i} version="B" onSeek={handleSeek} />
-                ))}
-              </div>
-            </div>
-
-            {/* Verdict */}
+            {/* Assessment panel — 1 col */}
             <div>
-              <VerdictPanel winner={data.verdict.winner} summary={data.verdict.summary} />
+              <OverallAssessmentPanel assessment={data.assessment} />
             </div>
           </motion.section>
         </div>

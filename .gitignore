@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Project artifacts
+/tmp/
+*.log
+data/cache/
+data/neurosynth_weights.npz
+data/vifs_surface.npy
+data/pines_surface.npy
+data/vifs_validated
+data/vifs_validation_failed
+/uploads/
+
+# Modal
+.modal/
+modal-secrets.toml
+
+# Environment files (never commit)
+.env
+.env.local
+.env.*.local
+
+# Claude Code session data
+.claude/
+
+# Per-request upload dirs (runtime artifacts, never commit)
+aesthesis_app/uploads/
+
+# Test videos (too large for git; commit-ignored even if present in worktree)
+*.mp4

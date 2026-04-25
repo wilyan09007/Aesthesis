@@ -3,19 +3,18 @@
 import { useState } from "react"
 import { motion } from "framer-motion"
 import UploadZone from "./UploadZone"
-import type { CaptureInputs, VideoFiles } from "@/lib/types"
+import type { CaptureInputs } from "@/lib/types"
 
 interface AssessViewProps {
   captureInputs: CaptureInputs | null
-  onAnalyze: (files: VideoFiles) => void
+  onAnalyze: (file: File) => void
   onBack: () => void
 }
 
 export default function AssessView({ captureInputs, onAnalyze, onBack }: AssessViewProps) {
-  const [fileA, setFileA] = useState<File | null>(null)
-  const [fileB, setFileB] = useState<File | null>(null)
+  const [file, setFile] = useState<File | null>(null)
 
-  const canAnalyze = fileA !== null && fileB !== null
+  const canAnalyze = file !== null
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -47,11 +46,11 @@ export default function AssessView({ captureInputs, onAnalyze, onBack }: AssessV
       </div>
 
       {/* Content */}
-      <div className="flex-1 max-w-3xl mx-auto w-full px-8 py-10 flex flex-col gap-8">
+      <div className="flex-1 max-w-2xl mx-auto w-full px-8 py-10 flex flex-col gap-8">
         <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }}>
-          <h2 className="text-2xl font-light mb-2" style={{ color: "#e8eaf0" }}>Upload Recordings</h2>
+          <h2 className="text-2xl font-light mb-2" style={{ color: "#e8eaf0" }}>Upload Your Demo</h2>
           <p className="text-sm" style={{ color: "rgba(255,255,255,0.4)" }}>
-            Upload MP4 recordings of each product experience. The neural pipeline will analyze both in parallel.
+            Drop a screen recording of any product flow. The neural pipeline reads it second-by-second and tells you exactly where attention, friction, and intent showed up.
           </p>
         </motion.div>
 
@@ -68,24 +67,22 @@ export default function AssessView({ captureInputs, onAnalyze, onBack }: AssessV
               </svg>
             </div>
             <div>
-              <p className="text-xs font-medium" style={{ color: "#5CF2C5" }}>Sessions captured</p>
+              <p className="text-xs font-medium" style={{ color: "#5CF2C5" }}>Session captured</p>
               <p className="text-xs mt-0.5" style={{ color: "rgba(255,255,255,0.35)" }}>
-                {captureInputs.urlA} → {captureInputs.urlB}
+                {captureInputs.url}
                 {captureInputs.goal && ` · Goal: ${captureInputs.goal}`}
               </p>
             </div>
           </motion.div>
         )}
 
-        {/* Upload zones */}
+        {/* Upload zone */}
         <motion.div
-          className="flex gap-6"
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.15 }}
         >
-          <UploadZone version="A" file={fileA} onFile={setFileA} />
-          <UploadZone version="B" file={fileB} onFile={setFileB} />
+          <UploadZone file={file} onFile={setFile} />
         </motion.div>
 
         {/* Requirements note */}
@@ -101,7 +98,7 @@ export default function AssessView({ captureInputs, onAnalyze, onBack }: AssessV
             <path d="M12 8v4M12 16h.01" />
           </svg>
           <p className="text-xs leading-relaxed" style={{ color: "rgba(255,255,255,0.3)" }}>
-            MP4 format recommended. Recordings should be at least 5 seconds. Both files are processed through TRIBE v2 in parallel — longer recordings produce richer temporal insight maps.
+            MP4 recommended. At least 5 seconds. Longer recordings produce richer per-second insights — TRIBE samples a brain frame every 1.5 seconds of footage.
           </p>
         </motion.div>
 
@@ -113,7 +110,7 @@ export default function AssessView({ captureInputs, onAnalyze, onBack }: AssessV
           transition={{ delay: 0.25 }}
         >
           <motion.button
-            onClick={() => onAnalyze({ a: fileA, b: fileB })}
+            onClick={() => file && onAnalyze(file)}
             disabled={!canAnalyze}
             className="flex items-center gap-2.5 px-8 py-3.5 rounded-xl text-sm font-medium transition-all"
             style={{
