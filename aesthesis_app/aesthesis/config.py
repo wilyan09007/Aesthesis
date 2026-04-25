@@ -57,6 +57,20 @@ class AppConfig(BaseModel):
         description="Delete uploaded MP4s after results are returned.",
     )
 
+    cors_allow_origins: list[str] = Field(
+        default_factory=lambda: [
+            o.strip() for o in os.getenv(
+                "CORS_ALLOW_ORIGINS",
+                "http://localhost:3000,http://127.0.0.1:3000",
+            ).split(",") if o.strip()
+        ],
+        description=(
+            "Origins allowed to call /api/analyze from the browser. "
+            "Set CORS_ALLOW_ORIGINS=* to allow any (dev only). "
+            "Defaults cover the Next.js dev server."
+        ),
+    )
+
     def model_post_init(self, _ctx) -> None:  # noqa: D401
         self.upload_dir.mkdir(parents=True, exist_ok=True)
 
