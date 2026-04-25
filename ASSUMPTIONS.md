@@ -12,7 +12,7 @@ Concretely shipped:
 
 1. **TRIBE service** (`tribe_service/`) — wraps `tribev2.demo_utils.TribeModel` as a FastAPI app. Returns the per-TR brain timeline + sliding-window composites for one MP4. Modal-deployable (`modal_app.py`), Docker-deployable (`Dockerfile`).
 2. **Aesthesis app backend** (`aesthesis_app/`) — FastAPI orchestrator. `POST /api/analyze` accepts two MP4 multipart uploads, validates them, calls TRIBE serially per D6, runs the Insight Synthesizer (Gemini 2.0 Flash), assembles the final results-page JSON.
-3. **Tests** — 53 passing tests covering all 8 per-TR composites, all 6 window composites, ROI extract, timeline assembly, event extraction, validation fallbacks, and an end-to-end smoke test that runs the entire pipeline against an in-process TRIBE service.
+3. **Tests** — pure-function unit tests covering all 8 per-TR composites, all 6 window composites, ROI extract, timeline assembly, event extraction, and upload validation. Tests that exercise the full pipeline require a deployed TRIBE GPU and a real `GEMINI_API_KEY` — there is no mock/smoke layer.
 4. **Verbose structured logging** — every step in both services emits log lines with `run_id`, `version`, `step`, and `elapsed_ms` fields. `LOG_LEVEL=DEBUG` surfaces shape checks and per-step timing.
 
 Explicitly **not** shipped (per "backend only, second stage"):
@@ -59,9 +59,7 @@ DESIGN.md §5.5 step 5 says: "Build Schaefer 400 masks: fetch volumetric atlas +
 2. Projects it to fsaverage5 via `nilearn.surface.vol_to_surf`.
 3. For each Yeo-7 network substring (`_Default_`, `_Limbic_`, `_Vis_`, `_Cont_`, `_DorsAttn_`, `_SomMot_`, `_SalVentAttn_`), produces a boolean mask of shape `(20484,)` and saves to `data/masks/<substring>.npy`.
 
-`init_resources.py::_try_load_real_masks` reads those `.npy` files from disk. If any are missing it raises with a hint pointing at `scripts/generate_weights.py`.
-
-**Mock mode** (`TRIBE_MOCK_MODE=1`): synthesizes plausible masks deterministically (`_synthesize_mock_masks`) so the entire pipeline (and tests) runs without nilearn or any real atlas data. The mask sizes roughly match published Yeo-7 fractions so per-ROI weight sums are non-trivial and downstream composites get realistic-looking input.
+`init_resources.py::_load_masks` reads those `.npy` files from disk. If any are missing it raises with a hint pointing at `scripts/generate_weights.py`.
 
 **The `scripts/` directory itself is not in this PR.** DESIGN.md §5.12 lists it as part of the long-term file layout; building the actual `generate_weights.py` / `project_signatures.py` / `validate_signatures.py` is Phase 0 / GPU-required work and out of scope for "backend only, second stage." The project structure leaves a clear hook (`init_resources._try_load_real_masks`) for those scripts to plug into.
 
@@ -69,7 +67,7 @@ DESIGN.md §5.5 step 5 says: "Build Schaefer 400 masks: fetch volumetric atlas +
 
 DESIGN.md §5.8 + `NEUROSYNTH_TERMS = ("fear", "reward", "uncertainty", "conflict", "social", "motor", "memory")`. We expect `data/neurosynth_weights.npz` with one array per term, shape `(20484,)`, non-negative.
 
-Real-mode loader: `init_resources._try_load_real_weight_maps`. Mock-mode loader: `_synthesize_mock_weight_maps` — gamma-distributed (right-skewed, non-negative) which matches the empirical shape of Neurosynth ALE weight maps.
+Loader: `init_resources._load_weight_maps`. Tests construct synthetic weight maps inline (gamma-distributed, right-skewed non-negative — matches the empirical shape of Neurosynth ALE) for unit-testing `extract_all` in isolation.
 
 **VIFS / PINES signatures** are loaded if present (`data/vifs_surface.npy`, `data/pines_surface.npy`). They are wired through to `Resources` but the v1 ROI extract doesn't subtract VIFS yet — that's the parcel-subset post-processing TODO documented in `TODOS.md` v2 §1.
 
@@ -83,14 +81,7 @@ DESIGN.md §4.5 + R1 specify the prompt verbatim. I copied the prompt + JSON sch
 
 **Image attachment:** for each event, the per-event screenshot is read as raw JPEG bytes and passed as an inline image part alongside the text prompt. DESIGN.md §4.5 step 2 specifies `screenshot_b64` in the input JSON; in the actual SDK call, raw bytes via `{"mime_type": "image/jpeg", "data": img}` is the modern equivalent and saves a base64-decode pass on the model side.
 
-**Mock mode** (`GEMINI_MOCK_MODE=1` or no `GEMINI_API_KEY`): synthesizer emits one believable insight per event, deterministically. `cited_brain_features` are populated from each event's primary ROI + `co_events`. The mock verdict picks the winner by majority of aggregate metrics. This lets the orchestrator + `output_builder` + smoke test all run without an API key.
-
-**Falls back to mock on:**
-- `_call_gemini` returns `{}` (malformed JSON)
-- Insight construction raises `pydantic.ValidationError`
-- `google-generativeai` not installed
-
-These all log a WARNING but never raise — partial results beat a 500.
+**Failure mode is loud:** missing `GEMINI_API_KEY`, missing `google-generativeai`, malformed JSON from Gemini, or schema mismatches all raise `SynthesizerError`. The orchestrator surfaces these as a 500 to the caller. There is no fallback to synthetic insights — a broken Gemini integration must show up at request time, not pass silently.
 
 ## 6. Aggregate metrics — how I picked the 8
 
@@ -121,21 +112,9 @@ When more than 15 raw events are mined, the truncation is tier-aware:
 
 This is my interpretation of "preserve diversity" (the design doc says "8-15 events" but doesn't specify how to truncate when raw count exceeds the cap).
 
-## 8. Mock-mode contract (the load-bearing dev affordance)
+## 8. No mock mode
 
-The user asked for verbose logging "for debugging purposes." A dev who can't reproduce the full pipeline locally has nothing to debug. So I built dual mock modes:
-
-- `TRIBE_MOCK_MODE=1` → `MockTribeRunner` produces `(n_TRs, 20484)` synthetic predictions whose shape and approximate magnitude resemble TRIBE output. `n_TRs` is derived from the video's actual duration if ffmpeg is around; defaults to 30 otherwise (~45s clip — matches the canonical 30s-clip demo per DESIGN.md D7 with a small TRIBE warmup).
-- `GEMINI_MOCK_MODE=1` → synthesizer skips Gemini entirely.
-
-Together, the mock modes mean **any developer with `pip install pytest fastapi numpy pydantic httpx` can run the entire backend end-to-end on a laptop**. CI, local dev, frontend integration all run in mock mode. The only thing mock mode doesn't do is actually predict brain activity — but everything downstream of TRIBE (event extraction, composite math, JSON shape, FastAPI surface) runs against real data flowing through the real code paths.
-
-Mock-mode synthetic predictions include:
-- Per-vertex Gaussian noise (low base level)
-- Low-frequency sinusoidal drift across random vertex subsets (so dominant flips happen)
-- 1-3 sharp synthetic spikes (so spike-detection has something to find)
-
-This is enough to exercise every event type, every composite, every gate.
+Earlier drafts of this backend shipped with `TRIBE_MOCK_MODE` and `GEMINI_MOCK_MODE` environment flags plus a `MockTribeRunner` and a synthetic Gemini synthesizer fallback. Those were removed: tests that pass against fake services give false confidence, and a "real GPU + real Gemini" requirement forces breakage to surface where it matters. The only synthetic data left in the codebase is the in-test mask/weight constructors used by `test_tribe_extract_roi.py` to unit-test the pure `extract_all` math in isolation — those are normal test fixtures, not runtime fakes.
 
 ## 9. ARQ optionality
 
@@ -156,8 +135,7 @@ This was a deliberate trade-off: I'd rather ship a partial result than a 500 err
 
 - `extract_events` produces an empty list (TRIBE input was too quiet to spike) → synthesizer skips Gemini for that version, response carries `events: []` and `insights: []`. Verdict still computes off the aggregate metrics alone.
 - TRIBE returns fewer than 4 TRs → window pass is skipped, frames pass still emits, response carries `windows: []`. Frontend can detect this (empty windows array) and render a warning.
-- Both videos produce identical mock signal → verdict mock returns "tie" deterministically. The real-Gemini verdict prompt explicitly says "if the result is ambiguous, return tie" — same behavior.
-- Mock TRIBE detects `mock=True` in its response; orchestrator propagates this onto the top-level `AnalyzeResponse.mock` field so the frontend can banner-mark mock results clearly during dev.
+- The real-Gemini verdict prompt explicitly says "if the result is ambiguous, return tie."
 
 ## 12. Per-vertex weight construction in `extract_all` — design note
 
@@ -177,7 +155,6 @@ response = {
     "aggregate_metrics": [AggregateMetric, ...],
     "verdict": Verdict,
     "elapsed_ms": float,
-    "mock": bool,
 }
 ```
 
@@ -193,18 +170,17 @@ If the frontend wants the full per-TR `frames` array (with per-frame `co_movemen
 
 ## 15. Test strategy
 
-The 53 tests split into:
+The tests split into:
 
-| File | What it tests | Runs without |
+| File | What it tests | Requires |
 |---|---|---|
 | `test_tribe_composites.py` | All 8 per-TR composites + all 6 window composites | numpy only |
 | `test_tribe_extract_roi.py` | `extract_all` shape, z-score, visual_fluency hook, mask sizing | numpy only |
 | `test_tribe_timeline.py` | `build_timeline` structure (frames + windows + roi_series) | numpy only |
 | `test_app_validation.py` | Upload validation + ffmpeg-missing fallback | nothing extra |
 | `test_app_events.py` | Each event type fires correctly + cap-aware truncation | nothing extra |
-| `test_integration_smoke.py` | Full `/api/analyze` flow with in-process TRIBE app | fastapi + httpx |
 
-Everything passes against fully-mocked TRIBE + fully-mocked Gemini. The only thing the test suite doesn't exercise is the real GPU path — that's the Phase 0 spike per DESIGN.md §5.15.6.
+Pure-function tests run on numpy alone. Anything that exercises the full pipeline must hit the deployed TRIBE GPU and a live Gemini API — there is no smoke test built around synthetic data, by design.
 
 ## 16. What you should do next
 

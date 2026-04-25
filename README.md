@@ -18,40 +18,16 @@ The full product spec lives in [`DESIGN.md`](./DESIGN.md). Implementation assump
 | **TRIBE service** | `tribe_service/` | Wraps `tribev2.demo_utils.TribeModel` as an HTTP API. Returns per-TR brain frames + window composites for an MP4. | GPU (Modal A100/H100, `keep_warm=1` per D2) |
 | **Aesthesis app** | `aesthesis_app/` | Public API. `POST /api/analyze` accepts two MP4 uploads, calls the TRIBE service serially, runs the Gemini synthesizer, returns the final results JSON. | CPU |
 
-Both services have a built-in **mock mode** (`TRIBE_MOCK_MODE=1`, `GEMINI_MOCK_MODE=1`) that returns deterministic synthetic data. The full pipeline runs end-to-end on a laptop with no GPU and no API keys — useful for frontend development and CI.
+Both services hit real backends — TRIBE runs on GPU, Gemini calls go through the real Google API. There is no mock mode. Tests require both.
 
-## Quick start (mock mode, no GPU required)
+## Setup
 
 ```bash
 # Install dev deps
 pip install -e ".[dev]"
 pip install -r requirements-dev.txt
 
-# Run all tests
-pytest
-
-# Run TRIBE service in mock mode (port 8001)
-cd tribe_service
-TRIBE_MOCK_MODE=1 uvicorn tribe_neural.api:app --port 8001
-
-# In another shell, run the Aesthesis app (port 8000)
-cd aesthesis_app
-TRIBE_SERVICE_URL=http://localhost:8001 GEMINI_MOCK_MODE=1 \
-  uvicorn aesthesis.main:app --port 8000
-
-# Smoke test
-curl -X POST localhost:8000/api/analyze \
-  -F "video_a=@demo_a.mp4" \
-  -F "video_b=@demo_b.mp4" \
-  -F "goal=evaluate the signup flow"
-```
-
-## Production (Modal + Gemini)
-
-Set up the TRIBE GPU service on Modal and point the app at it:
-
-```bash
-# Deploy TRIBE service (one-time)
+# Deploy TRIBE service to Modal (one-time)
 cd tribe_service
 modal deploy modal_app.py
 # → records the URL like https://your-org--aesthesis-tribe-process-video-timeline.modal.run
@@ -61,6 +37,18 @@ cd aesthesis_app
 export TRIBE_SERVICE_URL=https://your-org--aesthesis-tribe-process-video-timeline.modal.run
 export GEMINI_API_KEY=<your-google-key>
 uvicorn aesthesis.main:app --port 8000
+
+# Smoke check
+curl -X POST localhost:8000/api/analyze \
+  -F "video_a=@demo_a.mp4" \
+  -F "video_b=@demo_b.mp4" \
+  -F "goal=evaluate the signup flow"
+```
+
+Tests run against the deployed TRIBE service and a real `GEMINI_API_KEY`:
+
+```bash
+TRIBE_SERVICE_URL=... GEMINI_API_KEY=... pytest
 ```
 
 ## Logging
@@ -124,4 +112,4 @@ LOG_LEVEL=DEBUG uvicorn aesthesis.main:app
 
 - **Step 1 (Capture)** — BrowserUse + screen recorder + live frame streamer. Per the user's request, this PR is "backend only, second stage." Capture is Phase 2 in DESIGN.md §12.
 - **Frontend** — the Next.js wizard UI is not in this repo yet. The `output_builder` defines the JSON contract the UI will consume.
-- **Real TRIBE inference verification** — verified that the API surface matches `tribev2`'s public demo notebook. Actually loading the model and confirming VRAM headroom is the Phase 0 spike (DESIGN.md §5.15.6) and requires GPU access.
+- **Real TRIBE inference verification on local hardware** — the API surface matches `tribev2`'s public demo notebook. Actually loading the model and confirming VRAM headroom is the Phase 0 spike (DESIGN.md §5.15.6) and runs on the deployed Modal worker.

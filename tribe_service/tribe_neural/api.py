@@ -54,7 +54,6 @@ class VideoTimelineRequest(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str
-    mock_mode: bool
     gpu_available: bool
     arq_available: bool
     n_masks: int
@@ -130,7 +129,6 @@ def health() -> HealthResponse:
     res = _get_resources()
     return HealthResponse(
         status="ok",
-        mock_mode=res.mock_mode,
         gpu_available=_gpu_available(),
         arq_available=worker_mod.HAS_ARQ,
         n_masks=len(res.masks),

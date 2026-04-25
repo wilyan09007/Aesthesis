@@ -103,7 +103,7 @@ def warmup() -> dict:
     os.environ["TRIBE_DATA_DIR"] = "/app/data"
     from tribe_neural.init_resources import load_resources
 
-    res = load_resources(force_mock=False)
+    res = load_resources()
     return {
         "ok": True,
         "n_masks": len(res.masks),

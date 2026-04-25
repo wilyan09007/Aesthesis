@@ -46,7 +46,6 @@ async def health() -> dict[str, Any]:
     out: dict[str, Any] = {
         "status": "ok",
         "tribe_service_url": cfg.tribe_service_url,
-        "gemini_mock_mode": cfg.gemini_mock_mode,
         "max_duration_s": cfg.max_duration_s,
         "max_upload_bytes": cfg.max_upload_bytes,
     }

@@ -3,7 +3,7 @@
 #
 # Build: docker build -t aesthesis-tribe .
 # Run:   docker run --gpus all -p 8001:8001 -v $(pwd)/data:/app/data \
-#          -e TRIBE_MOCK_MODE=0 aesthesis-tribe
+#          aesthesis-tribe
 
 FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
 

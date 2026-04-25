@@ -50,10 +50,6 @@ class AppConfig(BaseModel):
     gemini_model_verdict: str = Field(
         default_factory=lambda: os.getenv("GEMINI_MODEL_VERDICT", "gemini-2.0-flash")
     )
-    gemini_mock_mode: bool = Field(
-        default_factory=lambda: os.getenv("GEMINI_MOCK_MODE", "0").lower()
-        in ("1", "true", "yes")
-    )
 
     cleanup_uploads: bool = Field(
         default_factory=lambda: os.getenv("CLEANUP_UPLOADS", "1").lower()

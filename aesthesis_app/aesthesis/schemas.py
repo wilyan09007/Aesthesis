@@ -107,7 +107,6 @@ class AnalyzeResponse(BaseModel):
     aggregate_metrics: list[AggregateMetric]
     verdict: Verdict
     elapsed_ms: float
-    mock: bool = False
 
 
 class ValidationFailure(BaseModel):

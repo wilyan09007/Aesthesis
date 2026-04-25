@@ -29,9 +29,6 @@ dev = [
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-ra -q --strict-markers"
-markers = [
-    "integration: end-to-end smoke tests using mock TRIBE / mock Gemini",
-]
 log_cli = true
 log_cli_level = "INFO"
 log_cli_format = "%(asctime)s [%(levelname)s] %(name)s :: %(message)s"

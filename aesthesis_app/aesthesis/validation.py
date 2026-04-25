@@ -74,8 +74,7 @@ def validate_upload(path: Path, cfg: AppConfig) -> ValidationResult:
     probe = _try_ffprobe(path)
     if probe is None:
         # No ffmpeg available. Accept the upload but warn — the TRIBE service
-        # will reject it later if it really is malformed. This keeps dev /
-        # mock mode functional on machines that lack ffmpeg.
+        # will reject it later if it really is malformed.
         log.warning(
             "skipping deep validation: ffmpeg unavailable. "
             "Accepting %s on header-only check.", path,

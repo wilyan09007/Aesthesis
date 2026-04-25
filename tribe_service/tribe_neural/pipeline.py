@@ -3,7 +3,7 @@
     MP4 path
        │
        ▼
-    runner.predict_video()         ← step1b (real or mock TRIBE inference)
+    runner.predict_video()         ← step1b (TRIBE v2 inference)
        │   (n_TRs, 20484)
        ▼
     extract_all()                  ← step2 (per-vertex preds -> 8 ROI series)
@@ -72,8 +72,7 @@ def process_video_timeline(
     log.info(
         "process_video_timeline begin",
         extra={**log_extra, "step": "pipeline", "video": str(video_path),
-               "window_trs": window_trs, "step_trs": step_trs,
-               "mock": resources.mock_mode},
+               "window_trs": window_trs, "step_trs": step_trs},
     )
 
     pipeline_t0 = time.perf_counter()
@@ -102,7 +101,6 @@ def process_video_timeline(
 
     processing_time_ms = round((time.perf_counter() - pipeline_t0) * 1000.0, 2)
     payload["processing_time_ms"] = processing_time_ms
-    payload["mock"] = resources.mock_mode
 
     log.info(
         "process_video_timeline done",

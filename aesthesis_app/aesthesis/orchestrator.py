@@ -81,8 +81,7 @@ async def run_analysis(
     log.info(
         "analysis begin",
         extra={**log_extra, "video_a": str(video_a), "video_b": str(video_b),
-               "goal": goal, "tribe_url": cfg.tribe_service_url,
-               "gemini_mock": cfg.gemini_mock_mode},
+               "goal": goal, "tribe_url": cfg.tribe_service_url},
     )
 
     overall_t0 = time.perf_counter()
@@ -108,8 +107,6 @@ async def run_analysis(
     timeline_a = await client.process_video_timeline(video_a, run_id=rid)
     log.info("posting to TRIBE: video B", extra={**log_extra, "version": "B"})
     timeline_b = await client.process_video_timeline(video_b, run_id=rid)
-
-    mock_mode = bool(timeline_a.get("mock") or timeline_b.get("mock"))
 
     # ── Step 4: events ──────────────────────────────────────────────────
     events_a = extract_events(timeline_a, "A")
@@ -137,13 +134,12 @@ async def run_analysis(
         aggregate_metrics=synth.aggregate_metrics,
         verdict=synth.verdict,
         elapsed_ms=elapsed_ms,
-        mock=mock_mode or cfg.gemini_mock_mode,
     )
 
     log.info(
         "analysis done",
         extra={**log_extra, "elapsed_ms": round(elapsed_ms, 2),
-               "winner": synth.verdict.winner, "mock": response.mock},
+               "winner": synth.verdict.winner},
     )
     return response
 

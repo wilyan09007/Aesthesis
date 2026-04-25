@@ -4,9 +4,9 @@ Two Gemini calls per A/B comparison:
     1. Per-video insight call — Events + screenshots + goal -> insights JSON.
     2. Verdict call — Aggregate metrics + per-version insights -> Verdict JSON.
 
-Mockable via `GEMINI_MOCK_MODE=1`. The mock generates one believable
-insight per event and a deterministic verdict so the orchestrator + output
-builder + tests can run without an API key.
+Failures from Gemini (missing dependency, missing key, malformed JSON,
+schema mismatch) raise `SynthesizerError`. The orchestrator surfaces these
+as a 500 to the caller.
 """
 
 from __future__ import annotations
@@ -21,9 +21,12 @@ from typing import Sequence
 from .config import AppConfig
 from .prompts import INSIGHT_PROMPT_TEMPLATE, VERDICT_PROMPT_TEMPLATE
 from .schemas import AggregateMetric, Event, Insight, Verdict, VersionTag
-from .screenshots import encode_frame_b64
 
 log = logging.getLogger(__name__)
+
+
+class SynthesizerError(RuntimeError):
+    """Raised when a Gemini call cannot be completed or its output is unusable."""
 
 
 @dataclass
@@ -35,8 +38,6 @@ class SynthesisResult:
     insights_calls_ms: float
     verdict_call_ms: float
 
-
-# ─── Gemini wrappers ─────────────────────────────────────────────────────────
 
 def _strip_code_fence(text: str) -> str:
     """Gemini in JSON mode usually returns raw JSON, but in `text` response
@@ -57,21 +58,16 @@ async def _call_gemini(prompt: str, *, cfg: AppConfig, model_name: str,
     parts alongside the text prompt so Gemini can ground insights in the
     actual UI screenshots.
     """
-    if cfg.gemini_mock_mode or not cfg.gemini_api_key:
-        log.info(
-            "Gemini mock mode (no API key)",
-            extra={"step": step, "run_id": run_id, "mock": True},
-        )
-        return {"_mock": True}
+    if not cfg.gemini_api_key:
+        raise SynthesizerError("GEMINI_API_KEY is not set")
 
     try:
         import google.generativeai as genai  # type: ignore
-    except ImportError as e:  # pragma: no cover
-        log.error(
-            "google-generativeai not installed; running in mock mode. Install or "
-            "set GEMINI_MOCK_MODE=1 to silence.",
-        )
-        return {"_mock": True}
+    except ImportError as e:
+        raise SynthesizerError(
+            "google-generativeai not installed. "
+            "Install with `pip install google-generativeai`."
+        ) from e
 
     genai.configure(api_key=cfg.gemini_api_key)
 
@@ -95,15 +91,10 @@ async def _call_gemini(prompt: str, *, cfg: AppConfig, model_name: str,
     try:
         return json.loads(text)
     except json.JSONDecodeError as e:
-        log.warning(
-            "Gemini returned malformed JSON: %s — using empty fallback",
-            e,
-            extra={"step": step, "run_id": run_id, "raw_len": len(text)},
-        )
-        return {}
+        raise SynthesizerError(
+            f"Gemini returned malformed JSON (step={step}): {e}"
+        ) from e
 
-
-# ─── Insight call ────────────────────────────────────────────────────────────
 
 def _serialize_event_for_prompt(e: Event) -> dict:
     return {
@@ -116,33 +107,6 @@ def _serialize_event_for_prompt(e: Event) -> dict:
     }
 
 
-def _mock_insights(events: list[Event], version: VersionTag) -> list[Insight]:
-    """Deterministic mock — one believable insight per event."""
-    out: list[Insight] = []
-    for e in events:
-        primary = e.primary_roi or "appeal_index"
-        out.append(Insight(
-            version=version,
-            timestamp_range_s=(round(max(e.timestamp_s - 1.5, 0), 2),
-                               round(e.timestamp_s + 1.5, 2)),
-            ux_observation=(
-                f"Mock observation: {e.type} on {primary} at "
-                f"t={e.timestamp_s:.1f}s with magnitude {e.magnitude:.2f}. "
-                "Real Gemini call would describe the visible UI moment here."
-            ),
-            recommendation=(
-                "Mock recommendation: investigate the specific UI element "
-                f"associated with {primary} at this timestamp."
-            ),
-            cited_brain_features=[
-                f"{e.type}.{primary}={e.magnitude:.2f}",
-                *e.co_events[:2],
-            ] if primary else [f"{e.type}_event"] + e.co_events[:2],
-            cited_screen_moment=f"Mock screenshot at t={e.timestamp_s:.1f}s",
-        ))
-    return out
-
-
 async def _generate_insights(
     events: list[Event],
     *,
@@ -151,17 +115,16 @@ async def _generate_insights(
     cfg: AppConfig,
     run_id: str,
 ) -> list[Insight]:
-    """Call Gemini once per video. Returns list[Insight]; falls back to
-    mock on failure or when mock mode is on."""
+    """Call Gemini once per video. Returns list[Insight].
+
+    Raises `SynthesizerError` if the call fails or produces zero valid
+    insights for a non-empty event list.
+    """
     if not events:
         log.info("no events to synthesize — skipping Gemini",
                  extra={"step": "gemini.insights", "version": version, "run_id": run_id})
         return []
 
-    if cfg.gemini_mock_mode or not cfg.gemini_api_key:
-        return _mock_insights(events, version)
-
-    # Build the events JSON block that the prompt embeds.
     events_serialized = [_serialize_event_for_prompt(e) for e in events]
     events_json = json.dumps(events_serialized, indent=2)
     prompt = INSIGHT_PROMPT_TEMPLATE.format(
@@ -176,7 +139,7 @@ async def _generate_insights(
         if e.screenshot_path and Path(e.screenshot_path).exists():
             try:
                 images.append(Path(e.screenshot_path).read_bytes())
-            except OSError:  # noqa: PERF203
+            except OSError:
                 continue
 
     raw = await _call_gemini(
@@ -184,30 +147,24 @@ async def _generate_insights(
         run_id=run_id, step="gemini.insights",
         images=images or None,
     )
-    if raw.get("_mock"):
-        return _mock_insights(events, version)
 
     out: list[Insight] = []
+    errors: list[str] = []
     for entry in raw.get("insights", []):
         try:
             out.append(Insight(version=version, **{
                 k: v for k, v in entry.items() if k != "version"
             }))
         except Exception as e:  # noqa: BLE001
-            log.warning(
-                "skipping malformed insight: %s — %s", entry, e,
-                extra={"step": "gemini.insights", "run_id": run_id, "version": version},
-            )
+            errors.append(f"{entry}: {e}")
     if not out:
-        log.warning(
-            "Gemini returned 0 valid insights — falling back to mock",
-            extra={"step": "gemini.insights", "run_id": run_id, "version": version},
+        raise SynthesizerError(
+            f"Gemini insight call (version={version}) returned 0 valid "
+            f"insights from {len(raw.get('insights', []))} entries. "
+            f"errors={errors}"
         )
-        return _mock_insights(events, version)
     return out
 
-
-# ─── Aggregate metrics + verdict ─────────────────────────────────────────────
 
 def _compute_aggregate_metrics(
     timeline_a: dict, timeline_b: dict,
@@ -215,15 +172,7 @@ def _compute_aggregate_metrics(
     """Compute the head-to-head metrics that go into the verdict prompt
     AND show up in the results-page JSON.
 
-    Mirrors the table in DESIGN.md §4.5 step 3:
-        - Mean appeal_index (integrated)
-        - Mean cognitive_load
-        - % time in reward_anticipation dominance
-        - % time in friction_anxiety dominance
-        - friction_anxiety spike count
-        - motor_readiness peak
-        - flow_state window count
-        - bounce_risk window count
+    Mirrors the table in DESIGN.md §4.5 step 3.
     """
     out: list[AggregateMetric] = []
 
@@ -306,42 +255,6 @@ def _compute_aggregate_metrics(
     return out
 
 
-def _mock_verdict(
-    metrics: list[AggregateMetric],
-    insights_a: list[Insight],
-    insights_b: list[Insight],
-) -> Verdict:
-    a_wins = sum(1 for m in metrics if m.edge == "A")
-    b_wins = sum(1 for m in metrics if m.edge == "B")
-    if a_wins == b_wins:
-        winner: VersionTag | str = "tie"
-    elif a_wins > b_wins:
-        winner = "A"
-    else:
-        winner = "B"
-
-    decisive_t = "0.0s"
-    if insights_a:
-        decisive_t = f"{insights_a[0].timestamp_range_s[0]:.1f}s"
-
-    return Verdict(
-        winner=winner,  # type: ignore[arg-type]
-        summary_paragraph=(
-            f"Mock verdict: {winner} wins on {max(a_wins, b_wins)} of "
-            f"{len(metrics)} aggregate metrics. Real Gemini would write a "
-            "narrative summary citing specific moments and metrics here. "
-            f"First decisive moment near t={decisive_t}."
-        ),
-        version_a_strengths=[
-            f"strong on {m.name}" for m in metrics if m.edge == "A"
-        ][:3] or ["balanced timeline"],
-        version_b_strengths=[
-            f"strong on {m.name}" for m in metrics if m.edge == "B"
-        ][:3] or ["balanced timeline"],
-        decisive_moment=f"Mock decisive moment near t={decisive_t}",
-    )
-
-
 async def _generate_verdict(
     metrics: list[AggregateMetric],
     insights_a: list[Insight],
@@ -351,9 +264,6 @@ async def _generate_verdict(
     cfg: AppConfig,
     run_id: str,
 ) -> Verdict:
-    if cfg.gemini_mock_mode or not cfg.gemini_api_key:
-        return _mock_verdict(metrics, insights_a, insights_b)
-
     metrics_block = json.dumps([m.model_dump() for m in metrics], indent=2)
     insights_a_json = json.dumps([i.model_dump() for i in insights_a], indent=2)
     insights_b_json = json.dumps([i.model_dump() for i in insights_b], indent=2)
@@ -367,19 +277,13 @@ async def _generate_verdict(
         prompt, cfg=cfg, model_name=cfg.gemini_model_verdict,
         run_id=run_id, step="gemini.verdict",
     )
-    if raw.get("_mock"):
-        return _mock_verdict(metrics, insights_a, insights_b)
     try:
         return Verdict(**raw)
-    except Exception as e:  # noqa: BLE001
-        log.warning(
-            "Gemini verdict malformed (%s); using mock fallback", e,
-            extra={"step": "gemini.verdict", "run_id": run_id},
-        )
-        return _mock_verdict(metrics, insights_a, insights_b)
+    except Exception as e:
+        raise SynthesizerError(
+            f"Gemini verdict returned an unparseable Verdict object: {e}"
+        ) from e
 
-
-# ─── Public entry ────────────────────────────────────────────────────────────
 
 async def synthesize(
     events_a: list[Event],

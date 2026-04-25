@@ -74,7 +74,6 @@ def build_response(
     elapsed_ms: float,
     video_url_a: str | None = None,
     video_url_b: str | None = None,
-    mock: bool = False,
 ) -> AnalyzeResponse:
     """Assemble the final JSON. Total per-call work is small — this just
     wraps already-computed pieces into the response model."""
@@ -108,5 +107,4 @@ def build_response(
         aggregate_metrics=aggregate_metrics,
         verdict=verdict,
         elapsed_ms=round(elapsed_ms, 2),
-        mock=mock,
     )

@@ -44,7 +44,7 @@ def test_oversize_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 def test_no_ffmpeg_falls_through(tmp_path: Path):
     """If ffmpeg-python isn't installed, validate_upload should accept
-    on header-only — so /api/analyze still works in mock-mode dev."""
+    on header-only — TRIBE will reject malformed videos downstream."""
     try:
         import ffmpeg  # type: ignore  # noqa: F401
         pytest.skip("ffmpeg-python is installed; this test exercises the "

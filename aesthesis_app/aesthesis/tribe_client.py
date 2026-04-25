@@ -4,7 +4,7 @@ Two transport options:
 - Multipart: client uploads the MP4 directly. Used when the app and the
   TRIBE service are deployed separately (the typical case — Modal).
 - JSON path: client passes a filesystem path that's already on the worker.
-  Used in mock-mode local dev when both services share a machine.
+  Used when both services share a machine and a volume.
 
 The orchestrator calls the multipart variant per DESIGN.md §10 Q11
 ("multipart upload to Aesthesis app server, then forward to Modal-hosted

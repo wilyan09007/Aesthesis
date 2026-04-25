@@ -8,7 +8,7 @@ inference through one model in VRAM.
 ARQ is optional in dev: if `arq` isn't installed, importing this module
 prints a one-line warning. The FastAPI app can still run synchronously
 via the `/process_video_timeline` endpoint, which calls the pipeline
-inline — useful in mock mode and for local tests.
+inline.
 """
 
 from __future__ import annotations

@@ -5,7 +5,7 @@ input event (DESIGN.md §4.5 step 2: "feed the LLM three things per event:
 the event record, the screenshot, the agent action log").
 
 If `ffmpeg-python` is unavailable, returns `None` for every event — the
-synthesizer falls back to event-only inputs. Useful in dev / mock mode.
+synthesizer sends the event payload to Gemini without an attached image.
 """
 
 from __future__ import annotations
