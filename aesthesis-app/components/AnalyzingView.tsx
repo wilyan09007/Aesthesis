@@ -15,6 +15,14 @@ interface AnalyzingViewProps {
   isResolved?: boolean
   onRetry?: () => void
   onCancel?: () => void
+  // D11 — Phase 2 capture path: show a "Captured. Analyzing in 3...2...1"
+  // gate before kicking off the analyze call. Cheap insurance against
+  // burning ~55-75s of TRIBE+Gemini compute on garbage captures (login
+  // walls, cookie modals). Skip-path callers leave both undefined and
+  // get the original immediate behavior.
+  confirmCountdownS?: number
+  onConfirm?: () => void
+  onConfirmCancel?: () => void
 }
 
 const STAGES = [
@@ -25,6 +33,34 @@ const STAGES = [
 ]
 
 const HOLD_AT_PCT = 95 // hold the last stage at this % until the response arrives
+
+const ACCENT = "#7C9CFF"
+
+/** Tiny video thumbnail used inside the D11 confirm-countdown panel. */
+function CountdownVideoThumb({ file }: { file: File | null }) {
+  const urlRef = useRef<string | null>(null)
+  if (file && !urlRef.current) {
+    urlRef.current = URL.createObjectURL(file)
+  }
+  if (!urlRef.current) {
+    return (
+      <div className="w-full h-full flex items-center justify-center">
+        <span className="text-4xl font-light" style={{ color: `${ACCENT}25` }}>·</span>
+      </div>
+    )
+  }
+  return (
+    <video
+      src={urlRef.current}
+      className="w-full h-full object-cover opacity-70"
+      muted
+      autoPlay
+      loop
+      playsInline
+      preload="metadata"
+    />
+  )
+}
 
 type PanelState = {
   stageIndex: number
@@ -102,12 +138,39 @@ export default function AnalyzingView({
   isResolved = false,
   onRetry,
   onCancel,
+  confirmCountdownS,
+  onConfirm,
+  onConfirmCancel,
 }: AnalyzingViewProps) {
   const [done, setDone] = useState(false)
   const onCompleteRef = useRef(onComplete)
   onCompleteRef.current = onComplete
 
-  const panel = usePanelProgress(0, () => setDone(true), isResolved)
+  // D11 — confirm gate before kicking off the analyze call (capture path)
+  const [gatePassed, setGatePassed] = useState<boolean>(confirmCountdownS == null)
+  const [secondsLeft, setSecondsLeft] = useState<number>(confirmCountdownS ?? 0)
+  const onConfirmRef = useRef(onConfirm)
+  onConfirmRef.current = onConfirm
+
+  useEffect(() => {
+    if (gatePassed || confirmCountdownS == null) return
+    if (secondsLeft <= 0) {
+      setGatePassed(true)
+      // eslint-disable-next-line no-console
+      console.info("[aesthesis:capture] confirm_countdown_complete -> firing analyze")
+      onConfirmRef.current?.()
+      return
+    }
+    const t = setTimeout(() => setSecondsLeft((s) => s - 1), 1000)
+    return () => clearTimeout(t)
+  }, [secondsLeft, gatePassed, confirmCountdownS])
+
+  // Don't start the progress animation until the gate has passed.
+  // usePanelProgress relies on a stable delay value across renders, so
+  // we conditionally short-circuit by passing a far-future delay until
+  // we're past the gate. (Safer than a conditional hook call.)
+  const progressDelay = gatePassed ? 0 : 60_000_000
+  const panel = usePanelProgress(progressDelay, () => setDone(true), isResolved)
 
   useEffect(() => {
     if (done) {
@@ -139,12 +202,18 @@ export default function AnalyzingView({
           {error ? "Failed" : "Processing"}
         </div>
         <h2 className="text-2xl font-light" style={{ color: "#e8eaf0" }}>
-          {error ? "Analysis failed" : "Neural Analysis Running"}
+          {error
+            ? "Analysis failed"
+            : confirmCountdownS != null && !gatePassed
+              ? "Captured"
+              : "Neural Analysis Running"}
         </h2>
         <p className="text-sm mt-2" style={{ color: "rgba(255,255,255,0.4)" }}>
           {error
             ? "The backend rejected this run. Details below."
-            : "Reading the demo through TRIBE v2"}
+            : confirmCountdownS != null && !gatePassed
+              ? `Analyzing in ${secondsLeft}…`
+              : "Reading the demo through TRIBE v2"}
         </p>
       </motion.div>
 
@@ -198,8 +267,62 @@ export default function AnalyzingView({
         </motion.div>
       )}
 
-      {/* Panel */}
-      {!error && (
+      {/* Confirm-countdown panel (D11 capture path) — replaces the
+          progress panel for the first 3s so the user sees the captured
+          video and can cancel if it's obviously garbage (login wall,
+          cookie modal, wrong page). */}
+      {!error && confirmCountdownS != null && !gatePassed && (
+        <motion.div
+          className="w-full max-w-2xl"
+          initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}
+        >
+          <div className="panel rounded-2xl p-6 flex flex-col gap-5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-2 h-2 rounded-full" style={{ background: ACCENT }} />
+                <span className="text-sm font-medium" style={{ color: "#e8eaf0" }}>Confirm capture</span>
+              </div>
+              <span className="text-xs font-mono" style={{ color: ACCENT }}>{secondsLeft}s</span>
+            </div>
+
+            <div className="relative rounded-xl overflow-hidden aspect-video"
+              style={{ background: "rgba(0,0,0,0.4)", border: "1px solid rgba(255,255,255,0.06)" }}>
+              <CountdownVideoThumb file={videoFile} />
+              <div className="absolute inset-0 flex items-center justify-center" style={{ background: "rgba(11,15,20,0.45)" }}>
+                <div className="text-center">
+                  <p className="text-5xl font-light tabular-nums" style={{ color: ACCENT }}>{secondsLeft}</p>
+                  <p className="text-xs mt-2" style={{ color: "rgba(255,255,255,0.45)" }}>Analyzing in…</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <p className="text-xs flex-1" style={{ color: "rgba(255,255,255,0.45)" }}>
+                If the captured video looks wrong (login wall, cookie modal, wrong page),
+                cancel now and try again before the analysis fires.
+              </p>
+              {onConfirmCancel && (
+                <button
+                  onClick={onConfirmCancel}
+                  className="px-4 py-2 rounded-lg text-xs font-medium"
+                  style={{
+                    background: "rgba(255,107,107,0.1)",
+                    border: "1px solid rgba(255,107,107,0.3)",
+                    color: "#FF6B6B",
+                    cursor: "pointer",
+                  }}
+                >
+                  Cancel
+                </button>
+              )}
+            </div>
+          </div>
+        </motion.div>
+      )}
+
+      {/* Panel — the original analyzing UI, shown after the gate passes
+          (or immediately on the skip path where confirmCountdownS is undefined). */}
+      {!error && (confirmCountdownS == null || gatePassed) && (
         <div className="w-full max-w-2xl">
           <AnalyzingPanel videoFile={videoFile} state={panel} isResolved={isResolved} />
         </div>
