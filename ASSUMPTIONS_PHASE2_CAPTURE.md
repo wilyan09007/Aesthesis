@@ -1,0 +1,416 @@
+# Phase 2 capture pipeline — assumptions, research log, environment requirements
+
+> Generated alongside the Phase 2 build (`feat/phase-2-capture` branch).
+> Pairs with `~/.claude/plans/dazzling-tinkering-sedgewick.md` (the locked
+> eng-review plan, decisions D11-D33) and `DESIGN.md` §§4.1, 4.2, 4.2b
+> (the original product spec, partially stale post-§17 single-video pivot).
+>
+> If any assumption below is violated by the runtime environment, the
+> capture pipeline fails LOUDLY (no silent fallback, no mocks, no skipif).
+> Per project memory `feedback_no_mocks` and the explicit `/ship`
+> instruction.
+>
+> See ASSUMPTIONS.md for the v0.1 backend (skip-path) assumptions. This
+> file documents only the Phase 2 capture additions — the URL → BrowserUse
+> → live frame stream + MP4 → existing analyzer flow.
+
+---
+
+## A1. browser-use 0.12.x is the pinned version
+
+**Source:** PyPI / GitHub (`browser-use/browser-use`), researched 2026-04-25.
+
+**Pin:** `browser-use==0.12.6` (exact version, not floating). See
+`requirements-app.txt` and `aesthesis_app/pyproject.toml`.
+
+**Why pinned (D22):** the `browser-use` public API has had breaking
+renames within minor versions in the last few months — `Browser` →
+`BrowserSession`, `Agent.run()` signature changes, configuration field
+renames. Floating `>=0.12,<0.13` would mean discovering an API break at
+3am the night before the demo. Pinning the exact version we tested
+against costs nothing and removes a class of failure.
+
+**API surface we depend on:**
+- `from browser_use import Agent, BrowserSession`
+- `BrowserSession(cdp_url="http://127.0.0.1:PORT")` to attach to an
+  existing Chromium we launched ourselves
+- `Agent(task=str, llm=langchain_llm, browser_session=session)`
+- `await agent.run()` — drives the page until done or LLM gives up
+
+**Version-bump procedure:** any browser-use version bump REQUIRES re-running
+`tests/test_browser_agent_kill.py` (R4) end-to-end against the new
+version before merging. The kill chain depends on the subprocess
+behaving correctly, and BrowserUse changes have historically broken
+that.
+
+---
+
+## A2. CDP `Page.startScreencast` and Playwright `record_video_dir` cannot coexist on a CDP-connected context
+
+**Source:** [microsoft/playwright-python#1225](https://github.com/microsoft/playwright-python/issues/1225)
+("How to use `record_video_dir` in `connect_over_cdp`?"), researched 2026-04-25.
+
+**Finding:** when you `connect_over_cdp(...)` to a pre-existing browser,
+the resulting `BrowserContext` cannot have `record_video_dir` (or other
+launch-time options) set — those are baked in at browser launch.
+
+**Implication for our architecture:** if we let BrowserUse launch
+Chromium itself and we connect via CDP for screencast, we cannot get a
+recorded MP4 from Playwright. Conversely, if we launch Chromium ourselves
+with `record_video_dir`, BrowserUse must connect via `cdp_url=...` (NOT
+launch its own browser), or it will spawn a sibling Chromium process
+that we can't see.
+
+**Resolution:** WE launch Chromium with Playwright (no `record_video_dir`,
+because we'd be locked to WebM and validation rejects non-H.264 — see
+A3). WE start `Page.startScreencast` on our page. We pass `cdp_url` to
+`BrowserSession(...)` so BrowserUse drives the same Chromium. CDP
+screencast frames serve double duty: streamed live AND stitched into a
+final H.264 MP4 via ffmpeg (single source of truth, no recordVideo).
+
+---
+
+## A3. `validation.py:92` enforces H.264 codec — non-H.264 video is rejected
+
+**Source:** `aesthesis_app/aesthesis/validation.py` line 92.
+
+**Finding:** the existing `validate_upload` runs `ffprobe` and returns
+a 400 if `codec_name.lower() != "h264"`. This applies to BOTH the
+existing skip-path `/api/analyze` (multipart) AND our new
+`/api/analyze/by-run/{id}` because both call the same orchestrator.
+
+**Implication:** the captured MP4 we produce in `browser_agent.py` MUST
+be H.264. Playwright's `record_video_dir` outputs WebM (VP8/VP9), which
+is a different container AND codec. Even if we WebM-wrapped it as
+`.mp4`, ffprobe would reject it.
+
+**Resolution:** ffmpeg-stitch the CDP screencast JPEGs into an H.264
+MP4 directly. The encode command in `_encode_frames_to_mp4` is:
+
+```
+ffmpeg -y -f image2pipe -vcodec mjpeg -framerate 10 -i -
+       -c:v libx264 -preset veryfast -pix_fmt yuv420p
+       -movflags +faststart -an output.mp4
+```
+
+JPEG bytes are piped on stdin (image2pipe demuxer). Output is H.264 in
+yuv420p pixel format with `+faststart` for streaming and `-an` because
+Aesthesis is video-only (DESIGN.md §17 audio-strip-end-to-end).
+
+---
+
+## A4. ffmpeg is required at runtime — system PATH OR imageio-ffmpeg bundled
+
+**Where it's needed:**
+1. `screenshots.py` (existing) — extracts per-event JPEGs from the MP4
+2. `browser_agent.py` (new) — stitches CDP frames into the H.264 MP4
+3. `validation.py` (existing) — runs `ffprobe`
+
+**Discovery order in `browser_agent._find_ffmpeg`:**
+1. `shutil.which("ffmpeg")` — system PATH
+2. `imageio_ffmpeg.get_ffmpeg_exe()` — bundled binary (logged as warning)
+3. Raise `RuntimeError` and exit subprocess with `setup_error`
+
+**Why a fallback to `imageio_ffmpeg` rather than hard-fail-only:** the
+bundled binary is a real, pinned ffmpeg binary that comes via pip. It's
+not a mock or a degraded substitute — it's just a different installation
+path. The fallback removes a "first-time clone confused why nothing
+works" friction without changing semantic behaviour. In CI, install
+`imageio-ffmpeg` and the path is bulletproof.
+
+**Verified on this dev box (Windows 11, Python 3.13.7):** system ffmpeg
+is NOT on PATH. `imageio-ffmpeg` is installed via the Phase 2
+`requirements-app.txt`, so the fallback path is exercised by default.
+
+---
+
+## A5. Captured MP4 framerate is constant 10fps; tier-walked frames slightly compress wall-clock time
+
+**Why:** the AdaptiveStreamer (D9) walks tiers based on observed FPS,
+so during a stream that walks T0→T2→T4, the actual frame cadence varies
+from 10 fps down to 2 fps. We feed the resulting frames to ffmpeg at a
+constant 10 fps, which means a clip whose source dropped to 2 fps for
+some seconds will encode those seconds at 5x real-time speed.
+
+**Acceptable for hackathon scope:** the captured wall-clock duration we
+report in `capture_complete.duration_s` is computed from the actual
+timestamps (`frames[-1].ts - frames[0].ts`), so the displayed length
+in the UI matches reality. The MP4 itself is slightly time-compressed
+during degraded segments, which Gemini and TRIBE both tolerate (TRIBE
+samples at 1.5s TR — well above any plausible compression artefact).
+
+**Future improvement:** use ffmpeg's `concat` demuxer with an explicit
+per-frame timestamp file to produce a true VFR (variable framerate) MP4.
+~30 min of work; not in v1.1 scope.
+
+---
+
+## A6. BrowserUse action history shape is not API-stable
+
+**Source:** browser-use 0.12.x source + GitHub issues.
+
+**Finding:** BrowserUse exposes the agent's per-step decisions and
+results via various attribute names across point releases — `agent.history`,
+`agent.state.history`, `agent.agent_history`. The schema of each entry
+also varies (`action`, `result`, `model_output`, ...).
+
+**Resolution:** `browser_agent._serialise_action_history(agent)` probes
+the candidate attributes in order and returns whatever it finds. If
+none match (e.g., a future version renames everything), it logs a
+warning and returns `[]`. The orchestrator's action-stamping path
+(`_attach_per_event_context`) treats an empty action log identically
+to no log at all — events just don't get `agent_action_at_t` stamped,
+the analysis still runs, and Gemini falls back to the goal-only prompt.
+
+**Sharp edge to monitor:** the first time a new BrowserUse version
+produces an unexpected shape, the warning will surface in the
+backend log (`agent.history_not_found`, with `agent_attrs` listing the
+actual attributes available). That's the cue to update the probe order.
+
+---
+
+## A7. RFC-5737 IPs are guaranteed unreachable for SIGKILL test (R4)
+
+**Source:** [RFC 5737](https://datatracker.ietf.org/doc/html/rfc5737).
+
+**Finding:** `192.0.2.0/24` (TEST-NET-1), `198.51.100.0/24` (TEST-NET-2),
+and `203.0.113.0/24` (TEST-NET-3) are reserved for documentation and
+will never be allocated to a real host. TCP connection attempts hang
+until the OS's default SYN timeout (typically 75-130s on Linux).
+
+**Use in tests:** `test_browser_agent_kill.py` uses `http://192.0.2.1`
+as the capture target. Chromium hangs in `page.goto(...)`, parent's
+wall-clock fires at 10s, SIGKILL exercises the kill chain.
+
+---
+
+## A8. `psutil>=5.9` provides `process_iter(['pid','name','create_time'])`
+
+**Source:** psutil docs / changelog.
+
+**Finding:** the `attrs` parameter to `process_iter` is honoured from
+psutil 5.x onwards, and `name` + `create_time` work cross-platform
+(Linux, macOS, Windows). On Windows, child PIDs of a SIGKILLed
+subprocess get reparented to PID 1 (or detach entirely depending on
+launch flags), so the by-pid sweep is not enough — we need the
+by-name + create_time sweep too, which is why `_kill_chromium_zombies`
+does both (D26).
+
+---
+
+## A9. FastAPI WebSocket endpoint binary frames + JSON control split (D30c)
+
+**Mechanism:** `await ws.send_bytes(...)` for raw JPEG frames,
+`await ws.send_json(...)` for control messages (`stream_degraded`,
+`capture_complete`, `capture_failed`). Frontend branches on
+`typeof e.data === "string"` (JSON) vs `e.data instanceof ArrayBuffer`
+(binary frame). The browser MUST set `ws.binaryType = "arraybuffer"`
+before connect.
+
+**Why split:** binary saves the ~33% base64 inflation per frame. JSON
+keeps control messages structured (no length-prefix protocol to
+maintain). Each WS message has a discrete boundary at the wire layer
+so there's no framing ambiguity.
+
+**Subprocess-side note:** the subprocess emits ALL events (including
+frames) as JSONL on stdout (base64-encoded frame bytes). The PARENT
+backend decodes the b64 and sends raw bytes on the WS — it's the
+parent that does the binary split, not the subprocess. Stdout pipe
+stays line-oriented + text mode, which simplifies parsing.
+
+---
+
+## A10. Chromium remote-debugging port is randomly assigned per run
+
+**Mechanism:** `_find_free_port()` binds to port 0, reads the assigned
+port, closes. Subprocess passes that port via `--remote-debugging-port=N`
+to Chromium and via `cdp_url=http://127.0.0.1:N` to BrowserUse.
+
+**TOCTOU race:** between us closing the probe socket and Chromium
+binding the port, another process could grab it. With D19 (cap=1
+concurrent capture), the only competitor is background OS chatter.
+Acceptable for hackathon. If we ever lift the cap, switch to a
+deterministic port-allocation strategy.
+
+---
+
+## A11. `langchain-google-genai` SecretStr workaround for Gemini auth
+
+**Source:** [browser-use/browser-use#1672](https://github.com/browser-use/browser-use/issues/1672)
+("DefaultCredentialsError with ChatGoogleGenerativeAI in Gemini").
+
+**Finding:** constructing `ChatGoogleGenerativeAI(model=...)` without
+explicit credentials triggers Google's Application Default Credentials
+path, which fails with a misleading error if you have no GCP setup
+locally. The fix is to pass `google_api_key=SecretStr(api_key)`
+explicitly.
+
+**Implementation:** `browser_agent._build_llm` reads `GEMINI_API_KEY`
+from env (or falls back to `GOOGLE_API_KEY`), wraps in `SecretStr`,
+passes to `ChatGoogleGenerativeAI`. Falls loud if neither env var is
+set — no demo-mode fallback to a fake LLM.
+
+---
+
+## A12. Cookie injection happens BEFORE first navigation (D31)
+
+**Mechanism:** `browser_agent.py` calls `await context.add_cookies(...)`
+after creating the `BrowserContext` and BEFORE calling `page.goto(args.url)`.
+This means cookies are already set when the URL loads — the request
+includes them in the `Cookie` header.
+
+**Caveat:** Playwright's `add_cookies` requires `domain` to be set on
+each cookie. Our `CookieSpec` Pydantic model enforces this (no Optional
+default).
+
+---
+
+## A13. Test environment: full env required, no skipif
+
+**Per the explicit `/ship` instruction:** "no mocks are allowed,
+including testing, all tests should fail loudly".
+
+**Test runtime requirements** (any test that hits a fixture asserting
+these will fail loudly with a clear message if missing):
+
+- Python 3.11+ (browser-use 0.12 hard requirement)
+- `pip install -e aesthesis_app/` (installs all Phase 2 deps)
+- `python -m playwright install chromium` (one-time, ~170-450MB)
+- ffmpeg on PATH OR `imageio-ffmpeg` bundled
+- `GEMINI_API_KEY` env var
+- For TRIBE-touching tests: `TRIBE_SERVICE_URL` reachable
+
+**No tests skip silently.** Tests that need an env they don't have call
+`pytest.fail(...)` with a message explaining what's missing. This is
+intentional — it makes "the test suite passed but we didn't run X"
+impossible.
+
+---
+
+## A14. Single-tenant cap (D19) — second capture returns 409
+
+**Implementation:** the module-level `_REGISTRY` in `capture/runner.py`
+holds at most 1 active `CaptureRunner`. `start_run()` checks
+`active_count() >= 1` and raises `CaptureInProgressError` (mapped to
+HTTP 409 by `main.py`).
+
+**Why cap=1:** Phase 2 is hackathon-scope, single-user demo. Two
+concurrent Chromiums would compete for resources and double the GPU/
+network/Modal-cost surface area. Multi-tenant is a v2 concern.
+
+**Cleanup on subprocess exit:** `_on_subprocess_exit` removes the
+runner from `_REGISTRY` so a new run can immediately launch. If a
+test or the user kills the registry mid-run, restart of `uvicorn`
+clears it (it's process-local state).
+
+---
+
+## A15. WebSocket disconnect grace window (D27) — 3s before SIGKILL
+
+**Mechanism:** `CaptureRunner.remove_subscriber` arms a 3-second
+`asyncio.sleep` task. If a new subscriber arrives within 3s,
+`add_subscriber` cancels the task. If the 3s elapses with zero
+subscribers AND the capture isn't complete, we SIGKILL.
+
+**Why:** React StrictMode (in Next.js dev mode) double-mounts effects,
+which causes the WebSocket to disconnect and immediately reconnect.
+A grace-less kill would terminate every dev-mode capture instantly.
+Also handles transient network blips.
+
+---
+
+## A16. Last lifecycle event replayed on reconnect (D32)
+
+**Mechanism:** `CaptureRunner.last_lifecycle` stores the most recent
+`stream_degraded` / `capture_complete` / `capture_failed` event. New WS
+connections (`add_subscriber`) immediately receive the stored event
+via `ws.send_json` after `accept()`.
+
+**Why:** without replay, a 1-second WS dropout AT THE MOMENT
+`capture_complete` fires leaves the frontend hanging on the last frame
+forever. Replay guarantees the frontend always learns the latest
+terminal state.
+
+**Frontend idempotency:** `LiveStreamPanel` gates `onCaptureComplete`
+and `onCaptureFailed` callbacks behind `completionFiredRef` /
+`failureFiredRef` so a replayed event after the original delivery
+doesn't double-fire the parent's analyze flow.
+
+---
+
+## A17. Captured artifacts retained on analyze failure (D33)
+
+**Behaviour:** `/api/analyze/by-run/{id}` cleans `upload_dir/{id}/`
+ONLY when `orchestrator.run_analysis` returns successfully. On any
+exception (`OrchestratorError`, `TribeServiceError`, anything else),
+artifacts persist for inspection.
+
+**Asymmetry vs `/api/analyze`:** the multipart skip path always cleans
+in `finally`. Capture artifacts are far more expensive to reproduce
+(re-running BrowserUse against a possibly-mutated page state takes
+30s + LLM cost), so retaining on failure is a deliberate DX win.
+
+**Operational note:** retained run dirs are at
+`{upload_dir}/{run_id}/` containing `video.mp4`, `actions.jsonl`,
+optionally `auth_cookies.json`, and the `frames/` work dir from the
+orchestrator. No automatic cleanup of failed runs — manual
+`rm -rf upload_dir/<id>` after debug. v2 will add a periodic sweep.
+
+---
+
+## A18. Frontend smoothness pipeline (D30 a/b/c)
+
+**D30a (jitter buffer):** frames arrive bursty over WebSocket; even at a
+steady source 10 fps, network/event-loop jitter clumps frames into
+bursts. `LiveStreamPanel` uses a 3-frame queue with drop-stale policy
+and renders at a fixed 100ms cadence via `requestAnimationFrame`.
+
+**D30b (off-main-thread decode):** `<img>.src = "data:image/jpeg;base64,..."`
+synchronously decodes JPEG on the main thread in most Chromium builds,
+which collides with React rerenders + framer-motion. The new pipeline
+uses `<canvas>` + `createImageBitmap` (off-main-thread decode) +
+`drawImage` (GPU-accelerated composite). Bitmap is closed after draw
+to release GPU memory.
+
+**D30c (binary WS frames):** described in A9 above.
+
+**Source:** these were arrived at by reasoning from first principles
+about perceived smoothness, then validated against current browser
+behavior. No external benchmarks consulted; expected real-world
+smoothness improvement is subjective and best confirmed by running the
+live demo.
+
+---
+
+## Quick-start checklist for someone running this fresh
+
+```bash
+# 1. Python 3.11+ — browser-use hard requirement
+python --version  # must be >= 3.11
+
+# 2. Install all Phase 2 deps
+pip install -e aesthesis_app/
+pip install -r requirements-dev.txt
+
+# 3. Playwright Chromium binary (one-time, ~170-450MB)
+python -m playwright install chromium
+
+# 4. ffmpeg — system OR bundled
+which ffmpeg || python -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())"
+
+# 5. Set GEMINI_API_KEY in .env
+echo "GEMINI_API_KEY=your-google-genai-key" >> .env
+
+# 6. Make sure TRIBE service URL is set (Modal deployment)
+echo "TRIBE_SERVICE_URL=https://yourname--aesthesis-tribe.modal.run" >> .env
+
+# 7. Run tests — fails loudly if any of the above is missing
+pytest aesthesis_app/tests/ -v
+
+# 8. Live dev
+./dev.sh   # or dev.cmd on Windows
+```
+
+If the test suite is green and `/dev.sh` says everything's running,
+hit `http://localhost:3000`, click "Capture & Assess", paste a URL,
+and the live screen recording should appear within ~3s.
