@@ -1,0 +1,67 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #0B0F14;
+  --panel: rgba(255, 255, 255, 0.04);
+  --border: rgba(255, 255, 255, 0.08);
+  --primary: #7C9CFF;
+  --accent: #5CF2C5;
+  --danger: #FF6B6B;
+  --text-muted: rgba(255, 255, 255, 0.45);
+}
+
+@theme inline {
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+html,
+body {
+  background-color: var(--bg);
+  color: #e8eaf0;
+  min-height: 100vh;
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 2px;
+}
+
+@keyframes pulse-glow {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
+@keyframes drift {
+  0%, 100% { transform: translateY(0px) rotate(0deg); }
+  33% { transform: translateY(-8px) rotate(0.5deg); }
+  66% { transform: translateY(4px) rotate(-0.5deg); }
+}
+
+.glow-primary {
+  box-shadow: 0 0 24px rgba(124, 156, 255, 0.18), 0 0 80px rgba(124, 156, 255, 0.06);
+}
+
+.glow-accent {
+  box-shadow: 0 0 24px rgba(92, 242, 197, 0.18), 0 0 80px rgba(92, 242, 197, 0.06);
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
