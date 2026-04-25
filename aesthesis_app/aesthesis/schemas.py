@@ -97,6 +97,14 @@ class TimelineSummary(BaseModel):
     composites_series: dict[str, list[float]] = Field(default_factory=dict)
     windows: list[dict] = Field(default_factory=list)
     processing_time_ms: float = 0.0
+    #: Per-parcel z-scored activations on the Schaefer-400 atlas, projected
+    #: to fsaverage5. Shape (n_TRs, 400). Drives the cortical brain in
+    #: BrainCortical.tsx. Optional: missing when the bake script hasn't
+    #: been run on the TRIBE worker; the frontend then falls back to the
+    #: placeholder geometry. See ASSUMPTIONS_BRAIN.md §1.3 / §3.6.
+    #:
+    #: Wire size: ~32 KB for a 30s clip (20 TRs × 400 floats × 4 bytes).
+    parcel_series: list[list[float]] | None = None
 
 
 class AnalyzeRequestMeta(BaseModel):

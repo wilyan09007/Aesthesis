@@ -80,6 +80,11 @@ export type TimelineSummary = {
   composites_series: Record<string, number[]>
   windows: Array<Record<string, unknown>>
   processing_time_ms: number
+  // Per-parcel z-scored activations (Schaefer-400 atlas, fsaverage5).
+  // Shape (n_TRs, 400). Drives BrainCortical.tsx. Null when the TRIBE
+  // worker hasn't been re-baked with the parcel map — frontend falls
+  // back to the placeholder geometry. See ASSUMPTIONS_BRAIN.md §1.3.
+  parcel_series: number[][] | null
 }
 
 export type AnalyzeRequestMeta = {
@@ -115,9 +120,68 @@ export type CaptureInputs = {
   goal: string
 }
 
+// ── Phase 2 capture wire types ─────────────────────────────────────────────
+// Mirror aesthesis_app/aesthesis/capture/protocol.py exactly. Source of
+// truth is the Pydantic side. If you change a field on either side without
+// changing the other, the request will fail loudly the first time it hits
+// the network.
+
+export type CookieSpec = {
+  name: string
+  value: string
+  domain: string
+  path?: string
+  expires?: number | null
+  httpOnly?: boolean | null
+  secure?: boolean | null
+  sameSite?: "Strict" | "Lax" | "None" | null
+}
+
+export type AuthSpec = {
+  cookies?: CookieSpec[] | null
+}
+
+export type RunRequest = {
+  url: string
+  goal?: string | null
+  auth?: AuthSpec | null
+}
+
+export type RunStartedResponse = {
+  run_id: string
+  status: "started"
+}
+
+export type CachedDemoEntry = {
+  url: string
+  label: string
+  mp4_filename: string
+}
+
+// WS control-message union. Binary WS frames carry raw JPEG bytes and have
+// NO envelope — anything received as a string is a control message matching
+// one of these shapes (D30c: split JSON control / binary data).
+//
+// The legacy `frame` variant is kept for back-compat with existing test
+// fixtures or older stubs but the v1.1+ pipeline never sends it (frames
+// are always binary now).
 export type WSMessage =
-  | { type: "frame"; frame_b64: string }
+  | { type: "frame"; frame_b64: string }   // legacy — no longer sent
   | { type: "stream_degraded" }
+  | {
+      type: "capture_complete"
+      run_id: string
+      duration_s: number
+      mp4_size_bytes: number
+      n_actions: number
+    }
+  | {
+      type: "capture_failed"
+      run_id: string
+      reason: "timeout" | "crashed" | "navigation_error" | "setup_error"
+      message: string
+    }
+  | { type: "agent_event"; description: string; timestamp_ms: number }
 
 // ── ROI display constants ──────────────────────────────────────────────────
 

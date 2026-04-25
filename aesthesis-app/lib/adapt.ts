@@ -52,15 +52,33 @@ export type ResultsViewData = {
   insights: Insight[]
   duration_s: number
   assessment: OverallAssessment
+  // (n_TRs, 400) per-parcel z-scored activations. Null when the TRIBE
+  // worker hasn't been baked with the parcel map. BrainCortical falls
+  // back to the placeholder when this is null. ASSUMPTIONS_BRAIN.md §3.6.
+  parcel_series: number[][] | null
+  // Lifted from raw.timeline so BrainCortical doesn't need to dig.
+  tr_duration_s: number
   raw: AnalyzeResponse
 }
 
 export function adaptForResultsView(resp: AnalyzeResponse): ResultsViewData {
+  // Verbose dev console — ASSUMPTIONS_BRAIN.md §5.3. Lets you tell at a
+  // glance whether the cortical brain will render or fall back. Console
+  // log lines are cheap; stripped by Next.js minifier in prod builds.
+  const parcelSeries = resp.timeline.parcel_series ?? null
+  // eslint-disable-next-line no-console
+  console.info("[adapt] parcel_series",
+    parcelSeries
+      ? { n_trs: parcelSeries.length, n_parcels: parcelSeries[0]?.length ?? 0 }
+      : "null (cortical brain will fall back to placeholder)",
+  )
   return {
     frames: framesFromTimeline(resp.timeline),
     insights: resp.insights,
     duration_s: resp.duration_s,
     assessment: resp.overall_assessment,
+    parcel_series: parcelSeries,
+    tr_duration_s: resp.timeline.tr_duration_s,
     raw: resp,
   }
 }
