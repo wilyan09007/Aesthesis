@@ -1,4 +1,11 @@
-# Dev / test dependencies. Lightweight — runs without GPU and without ffmpeg/Gemini.
+# Dev / test dependencies.
+#
+# IMPORTANT: tests are NO-MOCKS per project memory feedback_no_mocks. The
+# Phase 2 capture tests in particular spawn real subprocesses, real
+# Chromium, real BrowserUse, and call the real Gemini API. Tests fail
+# loudly when an environmental requirement is missing — they do not
+# silently skip. See ASSUMPTIONS.md for what must be installed/configured
+# in the test environment.
 
 pytest>=7.4
 pytest-asyncio>=0.23
@@ -7,3 +14,13 @@ httpx>=0.27          # used by FastAPI TestClient and as a real client in smoke 
 numpy>=1.26
 pydantic>=2.5
 fastapi>=0.110
+
+# ── Phase 2 test deps ─────────────────────────────────────────────────
+# psutil — used by the R4 SIGKILL regression test to verify no Chromium
+# zombies survive after subprocess kill.
+psutil>=5.9
+# websockets — for the real WS smoke test against the live FastAPI app.
+websockets>=12.0
+# Pillow — used by the streamer test to generate real JPEG frames the
+# adapt loop can ingest without needing a live Chromium.
+Pillow>=10.0

@@ -21,3 +21,18 @@ numpy>=1.26
 
 # Utilities
 python-dotenv>=1.0
+
+# ─── Phase 2 capture pipeline (DESIGN.md §§4.1, 4.2, 4.2b) ──────────────
+# Pinned per D22 — browser-use's public API has had breaking renames
+# (Browser -> BrowserSession, Agent.run signature) within minor versions.
+browser-use==0.12.6
+# Playwright drives Chromium for BrowserUse. Lower bound chosen for
+# stable new_cdp_session + Page.startScreencast args.
+playwright>=1.49,<2.0
+# Cross-platform process tree walk + by-name Chromium zombie sweep (D26)
+psutil>=5.9
+# ChatGoogleGenerativeAI integration for BrowserUse — reuses GEMINI_API_KEY
+langchain-google-genai>=4.0
+# ffmpeg fallback when system ffmpeg isn't on PATH. browser_agent.py
+# uses shutil.which("ffmpeg") first, then falls back to this.
+imageio-ffmpeg>=0.5

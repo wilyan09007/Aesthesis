@@ -72,6 +72,37 @@ if ! python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spe
     pip install -e aesthesis_app/ >/dev/null
 fi
 
+# ── Phase 2 capture pipeline bootstrap (D23) ────────────────────────────────
+# Playwright's chromium binary is a one-time ~170-450MB download outside
+# pip. Without it, BrowserUse exits at first launch with "Executable
+# doesn't exist". We probe via Python's playwright registry rather than
+# `find` because the cache path varies by OS (Linux ~/.cache/ms-playwright,
+# Windows %LOCALAPPDATA%\ms-playwright, macOS ~/Library/Caches/ms-playwright).
+if ! python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('playwright') else 1)" 2>/dev/null; then
+    echo "[dev] playwright python package not installed (Phase 2 capture path will fail); already pinned in requirements-app.txt — re-run 'pip install -e aesthesis_app/'" >&2
+fi
+# Detect chromium binary by asking playwright's CLI. If it can't find one,
+# auto-install. ~170-450MB download, one time per OS profile.
+if python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('playwright') else 1)" 2>/dev/null; then
+    if ! python -m playwright install --dry-run chromium 2>/dev/null | grep -q "is already installed"; then
+        if ! python -c "from playwright.sync_api import sync_playwright; pw=sync_playwright().start(); pw.chromium.executable_path; pw.stop()" 2>/dev/null; then
+            echo "[dev] playwright Chromium binary missing; running 'python -m playwright install chromium' (~170-450MB)…"
+            python -m playwright install chromium
+        fi
+    fi
+fi
+
+# ── ffmpeg sanity (Phase 2 needs it for screencast -> H.264 MP4) ────────────
+# browser_agent.py falls back to imageio_ffmpeg's bundled binary if system
+# ffmpeg isn't on PATH, so this is a soft warning rather than a hard stop.
+if ! command -v ffmpeg >/dev/null 2>&1; then
+    if python -c "import imageio_ffmpeg" 2>/dev/null; then
+        echo "[dev] system ffmpeg not on PATH — capture will fall back to imageio_ffmpeg bundled binary"
+    else
+        echo "[dev] WARNING: neither system ffmpeg nor imageio_ffmpeg available — Phase 2 capture (URL -> MP4) will FAIL LOUDLY at runtime" >&2
+    fi
+fi
+
 if [[ ! -d aesthesis-app/node_modules ]]; then
     echo "[dev] frontend deps missing; running 'npm install'…"
     (cd aesthesis-app && npm install)

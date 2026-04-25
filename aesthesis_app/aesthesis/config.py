@@ -71,8 +71,64 @@ class AppConfig(BaseModel):
         ),
     )
 
+    # ── Phase 2 capture (DESIGN.md §§4.1, 4.2, 4.2b) ─────────────────────
+    chromium_headless: bool = Field(
+        default_factory=lambda: os.getenv("CHROMIUM_HEADLESS", "1").lower()
+        in ("1", "true", "yes"),
+        description=(
+            "Whether the BrowserUse subprocess launches Chromium headless. "
+            "Default true. Flip to false (CHROMIUM_HEADLESS=0) for visual "
+            "debugging — note that headed mode requires a desktop session."
+        ),
+    )
+    browseruse_model: str = Field(
+        default_factory=lambda: os.getenv("BROWSERUSE_MODEL", "gemini-2.5-pro"),
+        description=(
+            "Gemini model name BrowserUse uses to pick actions. Reuses "
+            "GEMINI_API_KEY. Pro > Flash for action accuracy on complex pages."
+        ),
+    )
+    capture_max_wall_s: float = Field(
+        default_factory=lambda: float(os.getenv("CAPTURE_MAX_WALL_S", "90")),
+        description=(
+            "D1 hard wall-clock cap for the capture subprocess. Parent "
+            "SIGKILLs after this many seconds — protects against BrowserUse "
+            "hangs that ignore internal timeouts (issues #1157, #3615)."
+        ),
+    )
+    capture_recording_cap_s: float = Field(
+        default_factory=lambda: float(os.getenv("CAPTURE_RECORDING_CAP_S", "30")),
+        description=(
+            "D7 maximum CDP screencast duration. Subprocess stops the "
+            "screencast and finalizes the MP4 after this many seconds "
+            "even if BrowserUse hasn't returned. Inner cap — wall-clock "
+            "(capture_max_wall_s) is the outer safety net."
+        ),
+    )
+    capture_viewport_width: int = Field(
+        default_factory=lambda: int(os.getenv("CAPTURE_VIEWPORT_WIDTH", "1280")),
+        description="Chromium viewport width for the captured tab.",
+    )
+    capture_viewport_height: int = Field(
+        default_factory=lambda: int(os.getenv("CAPTURE_VIEWPORT_HEIGHT", "720")),
+        description="Chromium viewport height for the captured tab.",
+    )
+    cached_demos_dir: Path = Field(
+        default_factory=lambda: Path(
+            os.getenv("CACHED_DEMOS_DIR", "./aesthesis_app/cached_demos")
+        ).resolve(),
+        description=(
+            "D29 stage-day fallback. GET /api/cached-demos enumerates "
+            "MP4s in this dir (reads MANIFEST.json for url+label mapping). "
+            "Frontend offers a one-click 'Use cached demo' button on "
+            "capture_failed when the requested URL matches a cached entry."
+        ),
+    )
+
     def model_post_init(self, _ctx) -> None:  # noqa: D401
         self.upload_dir.mkdir(parents=True, exist_ok=True)
+        # cached_demos_dir is optional — only mkdir if explicitly set.
+        # (Default path may not exist on a fresh clone.)
 
 
 _config: AppConfig | None = None
