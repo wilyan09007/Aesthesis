@@ -6,17 +6,18 @@ import VideoPlayerSynced from "./VideoPlayerSynced"
 import BrainChart from "./BrainChart"
 import InsightCard from "./InsightCard"
 import VerdictPanel from "./VerdictPanel"
-import type { AnalyzeResponse, VideoFiles, ROIValues } from "@/lib/types"
+import type { Frame, ROIValues, VideoFiles } from "@/lib/types"
+import type { ResultsViewData } from "@/lib/adapt"
 
 const Brain3D = lazy(() => import("./Brain3D"))
 
 interface ResultsViewProps {
-  data: AnalyzeResponse
+  data: ResultsViewData
   videoFiles: VideoFiles
   onReset: () => void
 }
 
-function getCurrentROI(frames: { t_s: number; values: ROIValues }[], currentTime: number): ROIValues | undefined {
+function getCurrentROI(frames: Frame[], currentTime: number): ROIValues | undefined {
   if (!frames.length) return undefined
   let closest = frames[0]
   for (const f of frames) {
