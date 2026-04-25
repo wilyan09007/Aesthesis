@@ -2,6 +2,34 @@
 
 All notable changes to Aesthesis are recorded here. Format inspired by Keep a Changelog; versions follow the project's 4-digit `MAJOR.MINOR.PATCH.MICRO` scheme.
 
+## [0.3.0.0] - 2026-04-25
+
+### Added
+
+- **Real cortical brain visualization.** The Results page renders an actual fsaverage5 inflated cortical mesh (both hemispheres), colored per-parcel from TRIBE v2 z-scored activations, with drag-to-rotate. Replaces the prior icosahedron placeholder. Powered by `@react-three/fiber` (no new dependencies). Architecture mirrors Meta's TRIBE v2 demo (three.js + GLBs + per-vertex/per-face attributes) — see `ASSUMPTIONS_BRAIN.md` and `aesthesis-app/UIUX.md` §7.
+- **`aesthesis-app/components/BrainCortical.tsx`** — loads two GLBs (left + right hemisphere) via drei `useGLTF`, reads custom `_PARCELID` and `_SULC` vertex attributes baked at build time, drives a per-vertex color buffer (`THREE.DynamicDrawUsage`) on every TR change, mixes in sulcal shading. Falls back to the placeholder `Brain3D` when `parcel_series` is null so deploys can stage independently.
+- **`aesthesis-app/lib/colormap.ts`** — diverging blue↔red colormap (RdBu_r) anchored at z=0, with a smoothstep-based sulcal shading mix. Sign-aware: positive z reads warm, negative reads cool, zero is muted neutral.
+- **`tribe_service/scripts/bake_parcel_map.py`** — projects the Schaefer-400 atlas onto fsaverage5 via `nilearn.surface.vol_to_surf`, masks cross-hemisphere assignments by parsing label names, writes `data/schaefer400_parcels.npy`. Runs once, output ships in the Modal data volume.
+- **`tribe_service/scripts/bake_brain_glbs.py`** — bakes 4 GLBs (left/right × inflated/pial) under `aesthesis-app/public/brain/` with custom `_PARCELID` (uint16) and `_SULC` (float32) per-vertex attributes plus pre-computed normals. Hand-built buffer/bufferView/accessor graph via `pygltflib` to preserve the underscore-prefixed custom attribs through `THREE.GLTFLoader`.
+- **`tribe_service/tribe_neural/steps/step2b_parcels.py`** — per-parcel reduction (z-scored across time) running in parallel to the existing 8-ROI pipeline. Loud failures on NaN/Inf inputs, shape mismatches, and unassigned parcels.
+- **`TimelineSummary.parcel_series`** — new wire field on the `/api/analyze` response, shape `(n_TRs, 400)` float, optional. Backend emits it when the parcel map is loaded; frontend uses it to color the cortical mesh. ~32 KB per 30s clip.
+- **`tests/test_step2b_parcels.py`** — real-data parcel-reduction tests (no mocks). Asserts the shape contract, z-score properties, empty-parcel handling, and loud failure on NaN/Inf inputs. The artifact-dependent test fails with a runbook command when the Schaefer parcel map hasn't been baked.
+- **`ASSUMPTIONS_BRAIN.md`** — research log + architectural decisions for the cortical brain implementation. Covers fsaverage5 vertex order, Schaefer projection caveats, GLB custom-attribute survival through GLTFLoader, three.js BufferAttribute update patterns, and the no-mocks testing strategy.
+- **`aesthesis-app/UIUX.md`** — comprehensive UI/UX implementation plan with the brain-visualization phase plan (§7), cross-referencing the Meta TRIBE v2 demo's confirmed stack (hand-rolled three.js, two-tier mesh GLBs, per-face shader, pre-baked color streams).
+
+### Changed
+
+- **Insight timestamps clamped to video bounds.** `aesthesis_app/aesthesis/synthesizer.py` now passes `duration_s` into both Gemini prompts and snaps every returned `timestamp_range_s` into `[0, duration_s]`. Insights whose start lies past the video end are dropped with a logged warning. Fixes the bug where insight cards pointed past the end of the video player.
+- **Video panel sized to `50vw × 50vh`.** `aesthesis-app/components/VideoPlayer.tsx` resolves the duelling `flex-1` + `aspect-video` feedback loop that made the frame fill the viewport. Inner `flex-1` removed; outer panel given an explicit `height: 50vh`.
+- **Brain panel paired with the video.** `aesthesis-app/components/ResultsView.tsx` wraps the brain in its own `50vh × 50vh` panel with header (`Neural state · t = X.Xs`) and a "drag to rotate" caption. Faint pulsing-orb fallback during lazy-load instead of a generic spinner.
+- **Brain colormap sign-aware.** `aesthesis-app/components/Brain3D.tsx` squashes z-scores through `tanh(z * 0.7)` and applies asymmetric warm/cool shifts so negative activations read distinctly from "no signal." OrbitControls rotation enabled (zoom/pan still off).
+- **`tribe_service/tribe_neural/init_resources.py`** loads the Schaefer parcel map at worker boot when present; logs loudly when absent so the cortical-brain rendering's degradation path is obvious in startup logs.
+
+### Fixed
+
+- **`dev.sh` CRLF safety.** `.env` files with Windows line endings no longer leak `\r` into env var values (which broke `TRIBE_SERVICE_URL` curl checks). Strips CR via `tr -d '\r' < .env` process substitution before sourcing.
+- **`dev.cmd`** — Windows entry point. Locates Git for Windows' `bash.exe` and hands `dev.sh` off to it. Skips WSL bash because `dev.sh` expects Windows-side `python` / `npm` / `taskkill.exe`.
+
 ## [0.2.0.0] - 2026-04-25
 
 ### Added
