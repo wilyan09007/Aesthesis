@@ -187,7 +187,90 @@ Pure-function tests run on numpy alone. Anything that exercises the full pipelin
 1. **Run the Phase 0 spike** (DESIGN.md §5.15.6) — verify on real GPU that `tribev2.demo_utils.TribeModel.predict(events=df)` actually returns the shape I assumed, with the timing I assumed.
 2. **Build the data-prep scripts** under `scripts/` — Schaefer mask projection, Neurosynth ALE meta-analysis, VIFS/PINES signature projection. ~35 min of one-time work.
 3. **Deploy to Modal** — `cd tribe_service && modal deploy modal_app.py`. First run will take ~35 min while the data prep runs on the volume.
-4. **Wire up the frontend** to `POST /api/analyze` — the response shape is pinned in `aesthesis/schemas.py::AnalyzeResponse`.
+4. ~~Wire up the frontend~~ — done in v0.2.0.0; see §17 below.
 5. **Then layer in Step 1 (Capture)** — DESIGN.md §12 Phase 2.
 
 If anything in this file feels wrong, push back here and I'll revise. The idea is that DESIGN.md stays the spec and ASSUMPTIONS.md tracks the diff between spec and code.
+
+## 17. Frontend wire-up (v0.2.0.0)
+
+This section records every decision and bit of research from connecting the Next.js frontend (merged in by Vineel as `aesthesis-app/`) to the FastAPI backend. The goal was to replace `lib/mockData.ts` with real `/api/analyze` calls, with no mocks remaining anywhere in the project.
+
+### 17.1 Stack — what's actually in `aesthesis-app/`
+
+Read `aesthesis-app/AGENTS.md` first: *"This is NOT the Next.js you know."* Vineel is using a current-edge stack that postdates a lot of training data:
+
+- `next@16.2.4` (App Router only, Turbopack default)
+- `react@19.2.4`, `react-dom@19.2.4`
+- `framer-motion@12`, `recharts@3.8`, `@react-three/fiber@9` + `@react-three/drei@10`
+- `tailwindcss@4` via `@tailwindcss/postcss`
+- `typescript@5`
+
+What this meant in practice — verified by reading `node_modules/next/dist/docs/01-app/`:
+- **Environment variables** (`02-guides/environment-variables.md`): the `NEXT_PUBLIC_*` rule is unchanged in Next 16 — a prefixed env var is inlined at build time into the browser bundle. So `NEXT_PUBLIC_AESTHESIS_API_URL` is the right knob for where the browser POSTs.
+- **`fetch`** (`03-api-reference/04-functions/fetch.md`): the extended fetch in Next 16 still accepts the standard Web Fetch API. For our case (a client component in `app/page.tsx` doing a multipart upload from the browser) the fetch happens browser-side, so the Next.js cache extension doesn't apply — `cache: "no-store"` is set defensively because the response is a non-idempotent compute result that should never be cached.
+- No App-Router-specific quirks bit us. `app/page.tsx` stays a `"use client"` component because the file selector + analyzing UI are all interactive.
+
+### 17.2 Type alignment — backend Pydantic is the source of truth
+
+The merged-in `aesthesis-app/lib/types.ts` had a simplified `AnalyzeResponse` shape (3-field `Insight`, `verdict.summary`, per-frame `frames[]`) that didn't match the real backend `AnalyzeResponse` from `aesthesis_app/aesthesis/schemas.py`. Specifically:
+
+| Frontend (before)                          | Backend (Pydantic)                                                                              |
+|---                                         |---                                                                                              |
+| `Insight { timestamp_range_s, ux_observation, recommendation }` | `Insight { version, timestamp_range_s, ux_observation, recommendation, cited_brain_features, cited_screen_moment }` |
+| `Verdict { winner, summary }`              | `Verdict { winner, summary_paragraph, version_a_strengths, version_b_strengths, decisive_moment }` |
+| `VersionResult { frames, insights }`       | `VersionResult { version, video_url, duration_s, timeline: TimelineSummary, events, insights }` |
+| (no equivalent)                            | `TimelineSummary { n_trs, tr_duration_s, roi_series, composites_series, windows, processing_time_ms }` |
+| (no equivalent)                            | top-level `meta`, `aggregate_metrics`, `elapsed_ms`                                              |
+
+The frontend was clearly designed against the mock fixture — Vineel hadn't seen the real schema. **Decision: Pydantic wins.** I rewrote `aesthesis-app/lib/types.ts` as a 1:1 mirror of `schemas.py`. Then I added `aesthesis-app/lib/adapt.ts` with one function, `adaptForResultsView()`, that derives the small "view shape" the components actually consume:
+
+```ts
+type ResultsViewData = {
+  a: { frames: Frame[]; insights: Insight[]; duration_s: number }
+  b: { frames: Frame[]; insights: Insight[]; duration_s: number }
+  verdict: { winner; summary }   // mapped from summary_paragraph
+  raw: AnalyzeResponse
+}
+```
+
+Why an adapter and not a refactor of every component? `BrainChart`, `InsightCard`, and `VerdictPanel` all have polished props that match Vineel's mockData shape. Touching them all to read `data.a.timeline.roi_series` directly would be churn for no win — the adapter is 50 lines, runs once on response, and keeps every component code path identical.
+
+`framesFromTimeline()` rebuilds `Frame[]` from `roi_series` + `tr_duration_s` defensively: it picks the longest series so a missing ROI doesn't truncate the X axis (zero-fills missing values).
+
+### 17.3 Network call — what `lib/api.ts` does and why
+
+The full `/api/analyze` round trip is 12–25s (ffmpeg validate + serial TRIBE GPU calls + two Gemini insight calls + Gemini verdict). That's a long browser fetch. Decisions:
+
+- **Single round-trip**, not WebSocket / SSE / polling. The pipeline is already serial and the latency budget is dominated by GPU + Gemini, not browser wait. A streaming UX would require backend rework. We can revisit if/when the time budget grows.
+- **`AbortController` lifecycle in `app/page.tsx`** — if the user navigates back during an in-flight request (or starts a second analysis), we cancel the first. Without this, an orphaned 25s response would write into stale state. Pattern: `abortRef.current?.abort()` before each new launch.
+- **Multipart upload via `FormData`** — fields named exactly `video_a`, `video_b`, `goal` to match the FastAPI signature in `main.py::analyze`. Critically: don't set the `Content-Type` header manually. The browser writes `multipart/form-data; boundary=...` and overriding it with `multipart/form-data` (no boundary) breaks the multipart parser silently. The default behavior is correct; the temptation to "be explicit" is wrong.
+- **Run-id propagation via response header.** The backend generates `run_id` (UUID) per request and now returns it as `X-Aesthesis-Run-Id`. The frontend `analyze()` reads it on response and tags every subsequent log line with the truncated id. Cross-tier debugging across browser console + uvicorn logs becomes a `grep run_id`.
+- **Server-elapsed header `X-Aesthesis-Elapsed-Ms`** — also returned, exposed via CORS `expose_headers`. Lets us log "the network said 25.4s, the server said 24.7s, so 0.7s was wire" without instrumentation.
+- **Typed error: `AnalyzeError(message, status, body, runId)`.** The orchestrator returns 400 with `ValidationFailure { field, error }` wrapped in FastAPI's `detail`; 502 for TRIBE failures; 500 for everything else. The client unwraps `detail` and prefers `field: error` if shaped that way, else falls back to `body.detail` string, else generic. The error message + run_id surface verbatim in `AnalyzingView`'s error panel — the user gets the exact backend message and a copy-pasteable run_id.
+
+### 17.4 CORS
+
+The browser hits `localhost:8000` from `localhost:3000` — that's a different origin, so without CORS the preflight `OPTIONS` request fails before the multipart `POST` ever lands. Added `fastapi.middleware.cors.CORSMiddleware` in `main.py` with origins driven by a new config field `cors_allow_origins` (env var `CORS_ALLOW_ORIGINS`, default covers the Next dev server). `allow_credentials=False` because we don't send cookies — that keeps wildcard-style configs legal if someone needs them in dev. `expose_headers` lists the two `X-Aesthesis-*` headers so JS can read them; without that line the headers exist on the response but `resp.headers.get(...)` returns `null` in the browser — a footgun I've stepped on before.
+
+### 17.5 Progress UX during a 25s wait
+
+`AnalyzingView` already had a synthetic 4-stage progress animation. I kept it but added a network-aware hold:
+
+- The animation runs as before, but when it reaches stage 4 (the last one) and the network response *hasn't* arrived, progress sticks at 95% until it does.
+- When the response arrives (resolved=true), the animation continues to 100% naturally.
+- If the response errors, the progress bars are replaced with an error panel showing the backend message + run_id + Retry/Start-Over buttons.
+- A subtitle line distinguishes "Pipeline takes 12–25s end-to-end" (in flight) vs. "Response received — finalizing UI" (resolved, animation catching up).
+
+This is a better UX than either (a) a static "Loading..." spinner for 20s or (b) progress that finishes in 3s and then the user stares at a "complete" panel that hasn't actually completed. It does mean the progress is theatrical, not real — but real per-stage progress would require server-sent events from the orchestrator, which is out of scope here.
+
+### 17.6 Scope deletions
+
+- **`aesthesis-app/lib/mockData.ts`** is deleted. Per the project's no-mocks rule, fixture data designed to ship to production has no place in `lib/`. The only `MOCK_DATA` reference was in `app/page.tsx`'s `goResults` callback, now replaced with the real fetch path.
+- **No frontend tests yet.** Vineel didn't add any and I'm not adding stub tests just to have green checks. When tests come in they should hit the real backend (with a fixture MP4 pair) per the no-mocks rule — i.e. integration tests, not mocked unit tests of the API client.
+
+### 17.7 Things still unverified
+
+- **End-to-end smoke run.** I built and typechecked the frontend (`npx next build`, `npx tsc --noEmit`, both pass). I did not run the full local stack (uvicorn + Next dev server + a real MP4 pair + a real Gemini key). The wiring is right by construction, but the first real request is the only proof — somebody needs to flip the lights on.
+- **Run-id truncation.** The frontend logs use `run_id.slice(0, 8)` which is fine for grepping but loses uniqueness in pathological cases. Full run_id is preserved on `AnalyzeError.runId` and visible in the response header.
+- **Browser file size limits.** A 50MB MP4 is fine for `FormData`, but on slow uplinks a 25s server-side budget plus ~20s upload becomes ~45s total. We don't currently surface upload progress separately from the analyzing animation.

@@ -2,6 +2,27 @@
 
 All notable changes to Aesthesis are recorded here. Format inspired by Keep a Changelog; versions follow the project's 4-digit `MAJOR.MINOR.PATCH.MICRO` scheme.
 
+## [0.2.0.0] - 2026-04-25
+
+### Added
+
+- **Frontend ↔ backend wired up end to end.** Selecting two MP4s in `aesthesis-app/` now POSTs them to the FastAPI backend at `/api/analyze`, watches the (real) 12–25s pipeline, and renders the live brain timeline + insights + verdict. The `goResults` shortcut and `lib/mockData.ts` are gone.
+- **`aesthesis-app/lib/api.ts`** — typed client for `/api/analyze`. `AbortController` cancellation, run-id propagation via `X-Aesthesis-Run-Id` response header, server-timing via `X-Aesthesis-Elapsed-Ms`, structured `console.info` logging keyed on the truncated run id, typed `AnalyzeError(message, status, body, runId)` that unwraps FastAPI `ValidationFailure` detail bodies for human-readable messages.
+- **`aesthesis-app/lib/adapt.ts`** — backend `TimelineSummary { roi_series, tr_duration_s }` → `Frame[]` for the recharts/Brain3D consumers, plus `Verdict.summary_paragraph` → `verdict.summary` for the panel. One adapter call on response; components stay backend-shape-agnostic.
+- **CORS on the backend.** `CORSMiddleware` reads origins from `CORS_ALLOW_ORIGINS` (defaults cover the Next.js dev server). Preflight + actual POST now succeed cross-origin. The two `X-Aesthesis-*` headers are listed under `expose_headers` so JS can read them.
+- **HTTP request middleware** on the backend logs every request's method/path/status/elapsed_ms boundary.
+- **Network-aware progress UX in `AnalyzingView`.** The synthetic 4-stage progress bar now stalls at 95% until the response arrives, surfaces a backend error panel with run-id + Retry/Start-Over when the pipeline fails, and labels the last stage as "waiting on Gemini…" to match what's actually happening.
+- **`ASSUMPTIONS.md` §17** — full research log for the wire-up: Next.js 16 / React 19 verification (`node_modules/next/dist/docs/`), the Pydantic↔TS type alignment, the network-call + retry strategy, CORS choices, and what's still unverified end-to-end.
+
+### Changed
+
+- **`aesthesis-app/lib/types.ts`** is now a 1:1 mirror of `aesthesis_app/aesthesis/schemas.py`. Backend Pydantic is the single source of truth — divergence fails loudly at build time.
+- **`/api/analyze` response carries headers** `X-Aesthesis-Run-Id` and `X-Aesthesis-Elapsed-Ms` so cross-tier debugging is `grep run_id` across browser + uvicorn logs.
+
+### Removed
+
+- **`aesthesis-app/lib/mockData.ts`** — per the project's no-mocks rule, fixture data designed to ship to production has no place in `lib/`. The frontend now only renders real backend output.
+
 ## [0.1.0.0] - 2026-04-25
 
 ### Added
