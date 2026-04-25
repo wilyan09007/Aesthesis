@@ -41,13 +41,15 @@
 
 ## 1. Vision
 
-**Aesthesis is an AI judge for A/B comparison of any two product experiences, scored through a simulated human brain response.**
+**Aesthesis is a neural UX read on any product experience: drop a screen recording, get a brain-grounded analysis.**
 
-Give it two deployment URLs. It runs an autonomous demo of each, records the journey, narrates what a first-time user would see and feel, then feeds that narrative through Meta's TRIBE v2 brain encoding model — a multimodal foundation model trained on 451+ hours of fMRI data from 720+ humans. TRIBE v2 returns a per-second timeline of predicted neural activity across six interpretable cognitive/emotional regions. We translate that timeline into actionable UX insights timestamped to specific moments in each demo, then issue a head-to-head verdict.
+> Note (DESIGN.md §17, 2026-04-25): Aesthesis used to be an A/B comparison product. The pivot to single-video collapsed every "two videos in, winner out" path. The vision below has been rewritten; the pipeline-level sections that follow describe the new shape. The TRIBE service (§5.x) is unchanged — it's per-video by construction.
 
-The product answers the question: *"Which version of this experience does the human brain prefer, and exactly when and why does each one win or lose?"*
+Give it a deployment URL or upload an MP4. The pipeline reads the demo through Meta's TRIBE v2 brain encoding model — a multimodal foundation model trained on 451+ hours of fMRI data from 720+ humans. TRIBE v2 returns a per-second timeline of predicted neural activity across six interpretable cognitive/emotional regions. We translate that timeline into actionable UX insights timestamped to specific moments in the demo, then summarise the brain's overall reaction.
 
-Pitch line: "We don't ask users which version they like. We watch their brains."
+The product answers the question: *"What did the human brain notice in this demo, and exactly when did attention, friction, or intent fire?"*
+
+Pitch line: "Demo anything. See the analysis."
 
 ---
 
@@ -59,7 +61,7 @@ Three things just became true at once.
 2. **Browser agents finally work.** BrowserUse, Playwright + LLM, Anthropic Computer Use — autonomous agents can drive a real browser through a real product flow with usable reliability.
 3. **Vision-language models can narrate UX.** GPT-4V, Claude with vision, Gemini Pro Vision — they can watch a screen recording and describe what a user sees and likely feels, frame by frame.
 
-Stacking all three gives you something that didn't exist 12 months ago: an automatable neural A/B test that runs in minutes, not weeks.
+Stacking all three gives you something that didn't exist 12 months ago: an automatable neural UX read that runs in seconds, not weeks.
 
 The hackathon question: can we make a demo that lands the "whoa" before the cynicism kicks in?
 
@@ -67,70 +69,72 @@ The hackathon question: can we make a demo that lands the "whoa" before the cyni
 
 ## 3. The Pipeline (one-page view)
 
-**Two-step flow (D10):** Step 1 (Capture) is optional and fully skippable. Step 2 (Assess) is the load-bearing brain pipeline — it accepts two MP4s from EITHER source.
+**Two-step flow:** Step 1 (Capture) is optional and fully skippable. Step 2 (Assess) is the load-bearing brain pipeline — it accepts a single MP4 from either source. Pre-pivot this took two MP4s and ran them in serial; see §17.
 
 ```
                     ┌──────────────────────────────────────┐
                     │   STEP 1 — CAPTURE (optional)        │
-                    │   Inputs: URL A, URL B, Goal         │
+                    │   Inputs: URL, Goal                  │
                     └──────────────────┬───────────────────┘
                                        │
                                        ▼
                   ┌─────────────────────────────────────┐
-                  │  Browser Agents (parallel)          │
-                  │  BrowserUse subprocess × 2          │
+                  │  Browser Agent                      │
+                  │  BrowserUse subprocess              │
                   │  • Goal-targeted (≤30s)             │
                   │  • Adaptive 2-10fps live → WS       │
                   │  • SIGKILL on timeout               │
                   │  • Records MP4 (720p+)              │
                   └──────────────────┬──────────────────┘
-                                     │  demo_a.mp4, demo_b.mp4
+                                     │  demo.mp4
                                      ▼
                           ╔══════════════════╗
-                          ║  Two MP4s ready  ║◄── SKIP PATH:
+                          ║   MP4 ready      ║◄── SKIP PATH:
                           ╚════════╦═════════╝   user uploads
-                                   │              two MP4s
+                                   │              an MP4
                                    ▼              directly
    ┌──────────────────────────────────────────────────────┐
    │   STEP 2 — ASSESS (always runs)                      │
-   │   Inputs: demo_a.mp4, demo_b.mp4, Goal (optional)    │
+   │   Inputs: demo.mp4, Goal (optional)                  │
    └──────────────────────┬───────────────────────────────┘
                           │
                           ▼
         ┌─────────────────────────────────────────────┐
-        │  TRIBE v2 Service (Modal, keep_warm=1)      │
-        │  POST /process_video_timeline (SERIAL)      │
+        │  TRIBE v2 Service (Modal, scale-to-zero)    │
+        │  POST /process_video_timeline               │
         │  one GPU worker, max_jobs=1                 │
-        │   • Video A first (~3-8s for 30s clip)      │
-        │   • Then Video B (~3-8s)                    │
+        │   • Single video (~3-8s for 30s clip)       │
         │  → per-1.5s ROI frames + window composites  │
         └────────────┬────────────────────────────────┘
-                     │  brain_a.json then brain_b.json
+                     │  brain.json
                      ▼
               ┌────────────────────────────────┐
               │  Insight Synthesizer (Gemini)  │
-              │  Per-version: 2.0 Flash call,  │
+              │  Insights call: 2.0 Flash,     │
               │  events + screenshots + Goal → │
-              │  insights JSON (~3s ea)        │
-              │  Then verdict call (~2s)       │
+              │  insights JSON (~2-3s)         │
+              │  Assessment call (~1-2s) →     │
+              │  OverallAssessment             │
               └───────────────┬────────────────┘
                               ▼
               ┌────────────────────────────────┐
               │  Output UI (Next.js)           │
-              │  Side-by-side analysis panel:  │
+              │  Single-column analysis page:  │
               │   • MP4 player + scrub         │
-              │   • ROI line charts (8 keys)   │
-              │   • Insights + verdict         │
+              │   • ROI line chart (8 keys)    │
+              │   • Insight cards (timestamped)│
+              │   • OverallAssessmentPanel     │
+              │   • 8 absolute metrics         │
               └────────────────────────────────┘
 
 Total wall time:
-  • Step 1 (Capture): 30s agent runs (parallel) — SKIPPABLE
-  • Step 2 (Assess): 6–16s serial TRIBE + 5–8s Gemini = ~15–25s
-  • Capture-then-assess: ~45–55s
-  • Skip-then-assess: ~15–25s + however long the user takes to upload
+  • Step 1 (Capture): 30s agent run — SKIPPABLE
+  • Step 2 (Assess): 3-8s TRIBE + 3-5s Gemini = ~6-13s
+  • Capture-then-assess: ~36-43s
+  • Skip-then-assess: ~6-13s + however long the user takes to upload
 ```
 
-Every component is independently swappable. Two demos run in parallel. Insight synthesizer is the only step that sees both versions at once. Video goes straight into TRIBE — no narrator, no intermediate text.
+Every component is independently swappable. Video goes straight into TRIBE — no narrator, no intermediate text. The synthesizer issues two Gemini calls per analysis: one for per-event insights, one for the overall assessment.
 
 ---
 
@@ -634,28 +638,35 @@ Hard constraints:
 
 **The brain signal is the empirical anchor.** The LLM doesn't pull insights from thin air — it explains pre-detected, mathematically defined events. Each insight cites the specific brain feature that triggered it. That's what makes it defensible vs. a vibes-based UX critique.
 
-#### Step 3 — Head-to-head verdict
+#### Step 3 — Overall assessment (single-video pivot — see §17)
 
-Same procedure runs on Version B in parallel. Now we have two event lists and two insight lists.
+> Pre-pivot this step picked a winner between Version A and Version B by reading two parallel event/insight lists. With single-video, the task is "summarise THIS demo's brain arc." The synthesizer compiles 8 absolute metrics, then issues a Gemini call that emits an `OverallAssessment` JSON.
 
-For the verdict, compute **comparable aggregate metrics** across both:
+Compute **8 absolute metrics** scored against this demo's own timeline:
 
-| Metric | Version A | Version B | Edge |
-|---|---|---|---|
-| Mean `appeal_index` (integrated) | -0.12 | +0.34 | B (+0.46) |
-| Mean `cognitive_load` | 0.71 | 0.52 | B (less effort to use) |
-| % time in `reward_anticipation` dominance | 18% | 41% | B |
-| % time in `friction_anxiety` dominance | 23% | 8% | B |
-| `friction_anxiety` spike count | 4 | 1 | B (fewer aversive moments) |
-| `motor_readiness` peak (CTA intent) | +0.72 | +0.31 | A (clearer click intent on the CTA) |
-| `flow_state` window count | 0 | 2 | B (sustained absorbed engagement) |
-| `bounce_risk` window count | 1 | 0 | B (no near-bounce moments) |
+| Metric | Value | Interpretation |
+|---|---|---|
+| `mean_appeal_index` | -0.12 | appeal arc skewed negative |
+| `mean_cognitive_load` | 0.71 | sustained cognitive load above baseline |
+| `pct_reward_dominance` | 18% | 18% of the demo had reward dominant |
+| `pct_friction_dominance` | 23% | 23% of the demo had friction dominant |
+| `friction_spike_count` | 4 | 4 friction spike(s) detected |
+| `motor_readiness_peak` | +0.72 | peak click-readiness over the demo |
+| `flow_state_windows` | 0 | 0 flow-state window(s) |
+| `bounce_risk_windows` | 1 | 1 bounce-risk window(s) |
 
-Then a final LLM call reads these aggregates + the per-version insights and writes the verdict paragraph:
+Then a final LLM call reads these aggregates + the per-event insights and writes the assessment JSON:
 
-> "Version B wins overall. It produces 2.3× more reward anticipation time and 65% fewer friction spikes — a calmer, more delighting experience start to finish. Its standout moment is t=30–36s, where a `flow_state` window triggers during the product-tour interaction. Version A's one win is signup CTA strength (`motor_readiness=+0.72`) — its 'Get Started' button generates clearer click intent than B's 'Try Free.' If you're shipping one, ship B and steal A's CTA copy."
+> ```json
+> {
+>   "summary_paragraph": "The demo opens with strong appeal but slides into sustained cognitive load by t=12s. Friction spiked four times — most consequentially at t=18s when the signup form revealed 9 required fields after the inviting CTA. Motor readiness peaked at +0.72 around the 'Get Started' button, suggesting the CTA itself is doing its job. No flow-state windows triggered.",
+>   "top_strengths": ["clear CTA at t=8s drove motor_readiness +0.72", "sustained appeal in the first 6s"],
+>   "top_concerns": ["bait-and-switch friction spike at t=18s", "1 bounce-risk window between t=22-28s"],
+>   "decisive_moment": "t=18s: reward_anticipation→friction_anxiety dominant_shift after the form reveal"
+> }
+> ```
 
-**That's the judging mechanism end to end.** Numbers → events → insights → aggregates → verdict, each step grounded in the previous.
+**That's the judging mechanism end to end.** Numbers → events → insights → aggregates → overall assessment, each step grounded in the previous.
 
 #### Honest limitations
 
@@ -1215,13 +1226,23 @@ docs/
 
 ### 5.13 Performance budget (TRIBE service)
 
-| Mode | Step 1 (TRIBE) | Steps 2–6/7 | Total |
+The original budget below is **text-pathway numbers from the YNeurotrading reference architecture** and does not apply to the video pathway we actually ship. Kept here as historical context for sizing decisions; for the live video-pathway numbers see the "Video pathway (measured)" sub-table beneath.
+
+| Mode (text pathway, reference only) | Step 1 (TRIBE) | Steps 2–6/7 | Total |
 |---|---|---|---|
 | `/process` (single) | 2–5s GPU | <30ms CPU | 2–5s |
 | `/process_timeline`, n=20 TRs, window=4, step=1 | 2–5s GPU | ~17 windows × ~25ms + ~20 frames × ~1ms = ~450ms CPU | 2.5–5.5s |
 | `/process_timeline`, n=20 TRs, window=4, step=4 (non-overlapping) | 2–5s GPU | ~5 windows × ~25ms = ~150ms CPU | 2–5s |
 
 Single TRIBE inference covers both output modes — the timeline is essentially free relative to step 1.
+
+**Video pathway (measured 2026-04-25, A100-40GB, cold container, V-JEPA bake applied, audio strip in place):**
+
+| Mode | Wall time | Dominant cost |
+|---|---|---|
+| `/process_video_timeline` (13.7 s clip → 12 TRs × 8 ROIs) | **147.9 s** | V-JEPA-2-vitg encoding loop: 27 sequential B=1 forwards @ ~3.85 s/iter ≈ 104 s (70% of total) |
+
+Phase breakdown is in §15 entry 2026-04-25. The encoding loop is the irreducible bottleneck under the "don't touch tribev2 internals" rule — see that entry for the option set we evaluated and rejected (F batched chunks, G decord pre-decode, D BF16 autocast, H torch.compile, etc.).
 
 ### 5.14 Smoke test
 
@@ -1957,6 +1978,65 @@ Independent eng review with research-driven verification. 9 decisions made, seve
 
 ---
 
+### 2026-04-25 — TRIBE inference profiling + audio-patch reversal + V-JEPA bake
+
+After the first end-to-end live run measured ~150 s for a 13.74 s MP4 (an A100-40GB at $1.30/hr should not be running 11× slower than the source), profiled the call stack against upstream `neuralset==0.1.0` source (extracted from PyPI), applied the cheap fixes that don't reach into tribev2, and established a hard policy boundary for the rest.
+
+**New rule: don't touch tribev2 internals.**
+
+Definition: no monkey-patches into `neuralset.*` or `tribev2.*`, no overriding configuration of post-construction model objects, no changes that reach inside `TribeModel`. Acceptable: pre-/post-processing at the request boundary, Modal infra config, and any Python code we own. Reasoning: tribev2/neuralset is research code at v0.0.x / v0.1.0; upstream method names and signatures will move; every monkey-patch is a hidden coupling we'll silently break on `pip install` updates. The pre-existing audio monkey-patches predated this rule and were grandfathered until reversed in this session.
+
+This rule deletes from the option set everything that previously looked like a "5–10× speedup": batched chunk forwards, decord pre-decode, `torch.compile` of the inner model, BF16 autocast wrapping, `frequency`/`num_frames`/`max_imsize` tuning. Realistic floor under the rule: ~150 s on A100-40GB, ~60–90 s on H100, for a 13 s clip. Going below ~60 s requires either touching tribev2 or replacing it.
+
+**Decisions applied in this session:**
+
+| # | Decision | Result |
+|---|---|---|
+| A | Pre-fetch `facebook/vjepa2-vitg-fpc64-256` (~5 GB) into the Modal image's HF cache via `huggingface_hub.snapshot_download` at build time. HF token secret forwarded to support gated repos. | Eliminates the 35 s HF download every cold container previously paid on the first request. Image grows ~5 GB; build adds ~2 min upload. Audio/text encoders (Wav2Vec-BERT, LLaMA-3.2, DINOv2) deliberately NOT baked — `tribev2.main` prunes those extractors when no audio events exist, so they're never loaded; baking them would balloon the image by ~20 GB for zero runtime benefit. Edit: `tribe_service/modal_app.py` lines 88–104. |
+| B | Reverse `TribeRunner._patch_audio_pipeline_to_empty`. Audio strip at the request boundary becomes the sole mechanism. | The monkey-patch was defense-in-depth on top of the audio strip. With the strip working, tribev2's own pruning logic logs `Removing extractor audio as there are no corresponding events` / `Removing extractor text as there are no corresponding events` and the audio path is naturally inert. Verified live in the post-deploy run. Edit: `tribe_service/tribe_neural/tribe_runner.py` — removed `_patch_audio_pipeline_to_empty` static method (~73 lines) and its call site in `_ensure_model`. |
+| C | `_strip_audio_track` now fails loud — raises `PipelineError` (HTTP 500) instead of falling back to forwarding the original audio-laden video. | The previous fallback contradicted the new contract: silently passing audio to TRIBE re-introduces the whisperx bottleneck the strip exists to prevent. Loud failure makes ffmpeg/strip issues visible in logs; the only realistic failure mode is missing ffmpeg, which is a deploy bug. Edit: `tribe_service/tribe_neural/api.py` — both `FileNotFoundError`/`TimeoutExpired` and non-zero-rc paths now raise `PipelineError` with the original error chained. |
+
+**Live verification (2026-04-25, A100-40GB, cold container, post-A/B/C deploy):**
+
+```
+POST /process_video_timeline
+  body: multipart upload of IMG_6217.mp4 (13.74 s, 480×854, 23 fps, 2.1 MB)
+  → HTTP 200, 26 KB JSON, 12 TRs × 8 ROIs
+  → wall time: 147.9 s (server execution: 147.7 s)
+```
+
+Phase breakdown from Modal logs:
+
+| Phase | Time | Notes |
+|---|---|---|
+| Container cold start + TRIBE checkpoint load (volume) | ~5 s | Cached at `TRIBE_DATA_DIR/cache` |
+| V-JEPA HF metadata HEAD requests | ~5 s | Now cache-validation only (was 35 s download pre-A) |
+| `processor_config.json` 404s + redirects | ~4 s | Upstream HF repo doesn't ship the file; unfixable from our side |
+| Video load + chunk assembly (27 chunks × 64 frames) | ~7 s | moviepy seeks |
+| **V-JEPA-vitg encoding (27 sequential B=1 forwards @ ~3.85 s/iter)** | **~104 s** | **70% of total — the irreducible loop under our rule** |
+| Subject_id + dataloader + predict head | ~4 s | |
+| Telemetry, API response | <1 s | |
+
+The 27 chunks come from `neuralset.extractors.video.HuggingFaceVideo._get_data` line ~290 (verified against PyPI source); each iteration runs one V-JEPA-2-vitg forward with batch size hard-coded to 1 by `if t_embd.shape[0] != 1: raise RuntimeError(...)` at line ~298. Per-chunk cost is ~30–50 ms of moviepy seek-and-decode (1728 frame seeks total) + ~3.4 s of GPU forward; B=1 is what makes A100s starve here.
+
+**Bottleneck cemented as policy.** Under the "don't touch tribev2 internals" rule, the 104 s V-JEPA loop is the floor. The single-line lever that moves the needle without breaking the rule is `gpu="A100-40GB"` → `gpu="H100"` (~2× speedup → ~50 s loop, ~80–90 s total). All other meaningful gains require monkey-patching `HuggingFaceVideo._get_data` (batched forwards / decord pre-decode), wrapping the loaded model object (`torch.compile`, BF16 autocast), or overriding `HuggingFaceVideo` config (`max_imsize`, `frequency`, `num_frames`). All disallowed by the rule.
+
+**v2 TODOs (deferred):**
+
+1. **H100 swap** (1 line: `gpu="A100-40GB"` → `gpu="H100"`). Worth doing once the broader pipeline is stable. Cost: ~3× hourly rate (~$3.95/hr vs $1.30/hr on Modal) but request completes in roughly 60% of the time.
+2. **`min_containers=1`** during demo windows. Saves the ~5 s cold-start container init per request after idle. Cost: ~$31/day idle. Demo-only flag.
+3. **Modal `enable_memory_snapshot=True`**. Untested with GPU state on Modal; potential to collapse cold start to ~1 s if it works. Worth a one-off A/B against current cold-start time.
+4. **If the "no internals" rule ever softens for inference-only paths**: F (batched chunk forwards in `_get_data`) + G (decord pre-decode of the whole video once instead of 1728 moviepy seeks) is a ~2-day patch that takes the floor to ~25–35 s on A100, ~10–15 s on H100. Validation: 5-clip cosine-correlation > 0.999 against unbatched output before flipping default.
+
+**Files touched in this session:**
+
+- `tribe_service/modal_app.py` — added `.run_commands(snapshot_download('facebook/vjepa2-vitg-fpc64-256'))` step with HF token secret; reworded `tribev2` install + spaCy + bake comments to reflect the new audio-strip-only design.
+- `tribe_service/tribe_neural/tribe_runner.py` — removed `_patch_audio_pipeline_to_empty` static method and its call from `_ensure_model`; replaced the call-site comment with a description of the audio-strip-only design.
+- `tribe_service/tribe_neural/api.py` — `_strip_audio_track` rewritten to raise `PipelineError` on any ffmpeg failure; docstring rewritten to declare the strip as load-bearing with no fallback safety net.
+- `DESIGN.md` §17 audio section + §5.13 performance budget — updated to reference this entry's measured numbers.
+
+---
+
 ### 2026-04-24 — YNeurotrading collapsed to reference-only; Gemini for synthesizer; legacy keyset deleted
 
 **What changed:**
@@ -2024,5 +2104,68 @@ Independent eng review with research-driven verification. 9 decisions made, seve
 **ENG REVIEW DETAILS (2026-04-25):** 9 decisions made (D1–D9), 8 recommendations applied directly (R1–R8), 1 critical regression test mandated (SIGKILL on BrowserUse subprocess hang). Coverage diagram identified 19 untested paths; v1 minimum is SIGKILL test + 8 per-TR composite unit tests + Gemini eval harness. Research-driven verification confirmed: subcortical voxel count (8,802), CDP `everyNthFrame` parameter, Gemini 2.0 Flash pricing (~$0.002–0.004 per A/B comparison), V-JEPA 2-Giant size (1.2B params). Research disconfirmed: premise 3 retinotopy claim (DorsAttn IS retinotopic at voxel scale, so 2 of 8 ROIs partially affected, not 1). 2 v2 TODOs captured in `TODOS.md`: parcel-subset masks, subcortical extension.
 
 **VERDICT: ENG CLEARED — ready to implement Phase 0.**
+
+---
+
+## 17. Pivot: A/B comparison → single-video analysis
+
+**Date:** 2026-04-25.
+**Pitch line shift:** "We don't ask users which version they like. We watch their brains." → **"Demo anything. See the analysis."**
+
+### Why
+The A/B comparison shape was forcing every Aesthesis user into a "choose between two demos" funnel. That excludes the most common first-use scenario: someone who has *one* product and wants to know how the brain reads it. The pivot opens the surface area to landing pages, signup flows, dashboards, mobile-app captures — anything you can record.
+
+### What changed in the contract
+The whole `VersionTag = "A" | "B"` discriminator is gone. Every request, every record, every component is now single-subject.
+
+| Concept | Pre-pivot | Post-pivot |
+|---|---|---|
+| `POST /api/analyze` body | `video_a` + `video_b` | `video` |
+| `Event.version`, `Insight.version` | `"A" | "B"` | (removed) |
+| `AggregateMetric` | `{name, a, b, edge, edge_description}` | `{name, value, interpretation}` |
+| `Verdict` (winner picker) | exists | replaced by `OverallAssessment` |
+| `OverallAssessment` | — | new: `{summary_paragraph, top_strengths, top_concerns, decisive_moment}` |
+| `AnalyzeResponse` | `{a: VersionResult, b: VersionResult, verdict, ...}` | flattened: `{video_url, duration_s, timeline, events, insights, aggregate_metrics, overall_assessment, ...}` |
+| Synthesizer Gemini calls | 3 (insights × 2 + verdict) | 2 (insights + assessment) |
+| Wall time (Step 2) | 15-25s | 6-13s |
+
+### What stayed the same
+- TRIBE service (`§5.x`) — the GPU API was always per-video. `/process_video_timeline` is unchanged.
+- Schaefer masks, Neurosynth weight maps, ROI keyset (`NETWORK_KEYS_UX`) — all per-vertex math is unchanged.
+- Event extraction (`events.py`) — same 7 event types, same caps, just no `version` arg.
+- `aggregate_metrics` block keeps all 8 metric names; only the per-record shape changed (now absolute, not comparative).
+
+### Frontend layout (replaces §4.6)
+Single-column results page:
+1. **Top:** `VideoPlayer` (single MP4) + 3D brain at the current TR.
+2. **Middle:** `BrainChart` — one chart with 8 ROI lines, insight regions overlaid.
+3. **Bottom-left (2/3 width):** `InsightCard`s, one per timestamped event.
+4. **Bottom-right (1/3 width):** `OverallAssessmentPanel` — summary paragraph + top_strengths + top_concerns + decisive_moment.
+
+Files renamed: `VerdictPanel.tsx` → `OverallAssessmentPanel.tsx`, `VideoPlayerSynced.tsx` → `VideoPlayer.tsx` (no second video to sync to).
+
+### Out of scope for this pivot
+- Restoring A/B comparison as a separate `/compare` endpoint. Plausible v2 feature; the per-video pipeline survives unchanged so it would just be an orchestration layer on top.
+- Per-dimension absolute baselines for metric `interpretation` strings (we use within-video phrasing instead).
+- Eval suite for `OverallAssessment` quality — this needs a held-out set of demos with ground-truth UX feedback. Separate effort.
+
+### Audio pathway is removed end-to-end (2026-04-25)
+Aesthesis is video-only — **no audio anywhere in the pipeline**, ever. The user's intent: "delete all audio related operations, only video and images should remain." A single, request-boundary mechanism enforces this without touching tribev2 internals:
+
+**API-boundary strip (load-bearing).** ``tribe_neural/api._strip_audio_track`` rewrites the incoming MP4 with ``ffmpeg -an -c:v copy`` (sub-second, no re-encode) before the path is forwarded to TRIBE. The file that reaches the pipeline has zero audio streams. Failure of the strip raises ``PipelineError`` and returns 500 — silently passing audio to TRIBE would re-introduce the whisperx bottleneck and is now explicitly rejected.
+
+What an audio-stripped MP4 does to TRIBE's pipeline:
+- ``ExtractAudioFromVideo`` reads ``video.audio`` via moviepy → ``None`` → produces zero Audio events.
+- ``tribev2.main`` then prunes the audio and text extractors with "Removing extractor … as there are no corresponding events".
+- ``ExtractWordsFromAudio`` (whisperx, the original 2:30 / 30 s bottleneck) and the Wav2Vec-BERT raw-waveform encoder are never reached.
+
+What this changes in TRIBE's multimodal forward pass:
+- **Video frames → V-JEPA 2** — unchanged, the load-bearing modality.
+- **Raw audio → Wav2Vec-BERT** — never instantiated for this request (extractor pruned).
+- **Transcript words → LLaMA 3.2 text tokens** — never instantiated for this request (extractor pruned).
+
+**History.** Earlier revisions used a defense-in-depth design with an additional ``TribeRunner._patch_audio_pipeline_to_empty`` monkey-patch on ``ExtractAudioFromVideo._run`` and ``ExtractWordsFromAudio._get_transcript_from_audio``. That patch was removed once we adopted the rule "don't touch tribev2 internals" (see §15 entry 2026-04-25 — "TRIBE inference profiling + audio-patch reversal + V-JEPA bake") — the audio strip alone is sufficient because tribev2's own pruning logic ("Removing extractor … as there are no corresponding events") handles the empty-audio case natively. Pre-pivot, DESIGN.md §5.5 step 8 prescribed a whisperx GPU monkey-patch; we went further and removed audio entirely. Our 8 UX-tuned ROIs (``NETWORK_KEYS_UX``) are visual / cognitive / emotional networks — auditory cortex is not exposed in the keyset, so removing the audio modality has no impact on the surfaced ROI signals.
+
+Wall-time impact of removing audio: the whisperx 2:30-min CPU bottleneck is gone end-to-end. However, removing audio is necessary but not sufficient — the V-JEPA-2-vitg video encoding loop (27 × B=1 sequential forwards) is now the dominant cost. Measured wall time for a 13.7 s clip on A100-40GB cold container = **147.9 s** (full breakdown in §15 entry 2026-04-25). Earlier text-pathway-derived budgets in §5.13 do not apply to the video pathway.
 
 ---

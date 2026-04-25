@@ -1,4 +1,8 @@
-"""Event-extraction tests against synthetic timelines."""
+"""Event-extraction tests against synthetic timelines.
+
+Pure-function tests on `extract_events`. No mocks. The function takes a
+dict (TRIBE timeline shape) and returns a list of Event records.
+"""
 
 from __future__ import annotations
 
@@ -38,7 +42,7 @@ def _frame(
 
 
 def test_extract_events_empty_timeline():
-    assert extract_events(_make_timeline([]), "A") == []
+    assert extract_events(_make_timeline([])) == []
 
 
 def test_extract_events_picks_up_spike():
@@ -49,7 +53,7 @@ def test_extract_events_picks_up_spike():
                deltas={"friction_anxiety": 1.4}),
         _frame(3.0),
     ]
-    out = extract_events(_make_timeline(frames), "A")
+    out = extract_events(_make_timeline(frames))
     spike_events = [e for e in out if e.type == "spike"]
     assert len(spike_events) == 1
     assert spike_events[0].primary_roi == "friction_anxiety"
@@ -62,7 +66,7 @@ def test_extract_events_picks_up_dominant_shift():
         _frame(1.5, dominant="friction_anxiety", dominant_shift=True,
                values={"friction_anxiety": 1.0}),
     ]
-    out = extract_events(_make_timeline(frames), "A")
+    out = extract_events(_make_timeline(frames))
     shifts = [e for e in out if e.type == "dominant_shift"]
     assert len(shifts) == 1
     assert shifts[0].primary_roi == "friction_anxiety"
@@ -76,7 +80,7 @@ def test_extract_events_picks_up_sustained():
         _frame(3.0, dominant="aesthetic_appeal", values={"aesthetic_appeal": 1.2}),
         _frame(4.5, dominant="aesthetic_appeal", values={"aesthetic_appeal": 0.9}),
     ]
-    out = extract_events(_make_timeline(frames), "A")
+    out = extract_events(_make_timeline(frames))
     sustained = [e for e in out if e.type == "sustained"]
     assert len(sustained) == 1
 
@@ -87,7 +91,7 @@ def test_extract_events_picks_up_trough():
         _frame(0.0, values={"friction_anxiety": 0.9},
                composites={"appeal_index": -0.5}),
     ]
-    out = extract_events(_make_timeline(frames), "A")
+    out = extract_events(_make_timeline(frames))
     troughs = [e for e in out if e.type == "trough"]
     assert len(troughs) == 1
 
@@ -97,11 +101,11 @@ def test_extract_events_window_signals():
         {"t_start_s": 0.0, "t_end_s": 6.0, "composites": {"flow_state": True}},
         {"t_start_s": 6.0, "t_end_s": 12.0, "composites": {"bounce_risk": True}},
     ]
-    out = extract_events(_make_timeline([_frame(0.0)], windows=windows), "B")
+    out = extract_events(_make_timeline([_frame(0.0)], windows=windows))
     flows = [e for e in out if e.type == "flow"]
     bounces = [e for e in out if e.type == "bounce_risk"]
-    assert len(flows) == 1 and flows[0].version == "B"
-    assert len(bounces) == 1 and bounces[0].version == "B"
+    assert len(flows) == 1
+    assert len(bounces) == 1
 
 
 def test_extract_events_caps_at_event_cap():
@@ -113,7 +117,7 @@ def test_extract_events_caps_at_event_cap():
             spikes={"friction_anxiety": True},
             deltas={"friction_anxiety": float(i + 1)},
         ))
-    out = extract_events(_make_timeline(frames), "A")
+    out = extract_events(_make_timeline(frames))
     assert len(out) <= EVENT_CAP
     # Output should be in ascending time order.
     assert all(out[i].timestamp_s <= out[i + 1].timestamp_s for i in range(len(out) - 1))

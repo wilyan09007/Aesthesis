@@ -9,7 +9,7 @@ import AnalyzingView from "@/components/AnalyzingView"
 import ResultsView from "@/components/ResultsView"
 import { analyze, AnalyzeError, API_BASE_URL } from "@/lib/api"
 import { adaptForResultsView, type ResultsViewData } from "@/lib/adapt"
-import type { AppState, CaptureInputs, VideoFiles } from "@/lib/types"
+import type { AppState, CaptureInputs } from "@/lib/types"
 
 const pageVariants = {
   initial: { opacity: 0, y: 12 },
@@ -22,12 +22,12 @@ const pageTransition = { duration: 0.3, ease: [0.4, 0, 0.2, 1] as [number, numbe
 export default function Home() {
   const [state, setState] = useState<AppState>("landing")
   const [captureInputs, setCaptureInputs] = useState<CaptureInputs | null>(null)
-  const [videoFiles, setVideoFiles] = useState<VideoFiles>({ a: null, b: null })
+  const [videoFile, setVideoFile] = useState<File | null>(null)
   const [results, setResults] = useState<ResultsViewData | null>(null)
   const [analyzeError, setAnalyzeError] = useState<string | null>(null)
 
   // Abort controller — if the user clicks back / starts a new run while a
-  // request is in flight, we cancel it. /api/analyze can run for 25s; an
+  // request is in flight, we cancel it. /api/analyze can run for ~13s; an
   // orphaned fetch would write into stale UI state.
   const abortRef = useRef<AbortController | null>(null)
 
@@ -35,12 +35,12 @@ export default function Home() {
   const goAssess = useCallback(() => setState("assess"), [])
 
   const launchAnalysis = useCallback(
-    async (files: VideoFiles, goal: string | null) => {
-      if (!files.a || !files.b) {
-        setAnalyzeError("Both videos are required.")
+    async (file: File, goal: string | null) => {
+      if (!file) {
+        setAnalyzeError("A video is required.")
         return
       }
-      setVideoFiles(files)
+      setVideoFile(file)
       setResults(null)
       setAnalyzeError(null)
       setState("analyzing")
@@ -53,18 +53,12 @@ export default function Home() {
       // eslint-disable-next-line no-console
       console.info("[aesthesis] launching analysis", {
         api: API_BASE_URL,
-        size_a: files.a.size,
-        size_b: files.b.size,
+        size: file.size,
         goal_present: !!goal,
       })
 
       try {
-        const raw = await analyze({
-          fileA: files.a,
-          fileB: files.b,
-          goal,
-          signal: ac.signal,
-        })
+        const raw = await analyze({ file, goal, signal: ac.signal })
         if (ac.signal.aborted) return
         setResults(adaptForResultsView(raw))
       } catch (e) {
@@ -91,11 +85,9 @@ export default function Home() {
     }
   }, [results])
 
-  // If results arrive AFTER progress has already completed (rare for a 25s
-  // backend, common if the user stalls on the analyzing screen), advance.
+  // If results arrive AFTER progress has already completed, advance.
   useEffect(() => {
     if (state === "analyzing" && results) {
-      // Tiny delay so the "complete" tick is visible.
       const t = setTimeout(() => setState("results"), 250)
       return () => clearTimeout(t)
     }
@@ -105,7 +97,7 @@ export default function Home() {
     abortRef.current?.abort()
     setState("landing")
     setCaptureInputs(null)
-    setVideoFiles({ a: null, b: null })
+    setVideoFile(null)
     setResults(null)
     setAnalyzeError(null)
   }, [])
@@ -135,8 +127,8 @@ export default function Home() {
           <motion.div key="assess" variants={pageVariants} initial="initial" animate="animate" exit="exit" transition={pageTransition}>
             <AssessView
               captureInputs={captureInputs}
-              onAnalyze={(files) =>
-                launchAnalysis(files, captureInputs?.goal ?? null)
+              onAnalyze={(file) =>
+                launchAnalysis(file, captureInputs?.goal ?? null)
               }
               onBack={() => setState(captureInputs ? "capture" : "landing")}
             />
@@ -146,10 +138,10 @@ export default function Home() {
         {state === "analyzing" && (
           <motion.div key="analyzing" variants={pageVariants} initial="initial" animate="animate" exit="exit" transition={pageTransition}>
             <AnalyzingView
-              videoFiles={videoFiles}
+              videoFile={videoFile}
               onComplete={handleAnalyzeProgressComplete}
               error={analyzeError}
-              onRetry={() => launchAnalysis(videoFiles, captureInputs?.goal ?? null)}
+              onRetry={() => videoFile && launchAnalysis(videoFile, captureInputs?.goal ?? null)}
               onCancel={reset}
               isResolved={results !== null}
             />
@@ -158,7 +150,7 @@ export default function Home() {
 
         {state === "results" && results && (
           <motion.div key="results" variants={pageVariants} initial="initial" animate="animate" exit="exit" transition={pageTransition}>
-            <ResultsView data={results} videoFiles={videoFiles} onReset={reset} />
+            <ResultsView data={results} videoFile={videoFile} onReset={reset} />
           </motion.div>
         )}
       </AnimatePresence>

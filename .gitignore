@@ -43,3 +43,12 @@ modal-secrets.toml
 .env
 .env.local
 .env.*.local
+
+# Claude Code session data
+.claude/
+
+# Per-request upload dirs (runtime artifacts, never commit)
+aesthesis_app/uploads/
+
+# Test videos (too large for git; commit-ignored even if present in worktree)
+*.mp4

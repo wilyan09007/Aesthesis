@@ -2,10 +2,9 @@
 
 import { useEffect, useRef, useState } from "react"
 import { motion, AnimatePresence } from "framer-motion"
-import type { VideoFiles } from "@/lib/types"
 
 interface AnalyzingViewProps {
-  videoFiles: VideoFiles
+  videoFile: File | null
   onComplete: () => void
   // Real-network plumbing (page-level state). When `error` is non-null, the
   // request failed. When `isResolved` is true, the response is in and we
@@ -56,9 +55,6 @@ function usePanelProgress(
       tick = setInterval(() => {
         const lastStage = currentStage === STAGES.length - 1
 
-        // Hold at HOLD_AT_PCT during the last stage until the network
-        // request resolves. Otherwise the bar would finish in ~3s while
-        // the backend takes 12-25s to respond.
         if (lastStage && !isResolvedRef.current && currentProgress >= HOLD_AT_PCT) {
           setProgress(HOLD_AT_PCT)
           return
@@ -100,27 +96,25 @@ function usePanelProgress(
 }
 
 export default function AnalyzingView({
-  videoFiles,
+  videoFile,
   onComplete,
   error,
   isResolved = false,
   onRetry,
   onCancel,
 }: AnalyzingViewProps) {
-  const [aDone, setADone] = useState(false)
-  const [bDone, setBDone] = useState(false)
+  const [done, setDone] = useState(false)
   const onCompleteRef = useRef(onComplete)
   onCompleteRef.current = onComplete
 
-  const panelA = usePanelProgress(0, () => setADone(true), isResolved)
-  const panelB = usePanelProgress(500, () => setBDone(true), isResolved)
+  const panel = usePanelProgress(0, () => setDone(true), isResolved)
 
   useEffect(() => {
-    if (aDone && bDone) {
-      const t = setTimeout(() => onCompleteRef.current(), 800)
+    if (done) {
+      const t = setTimeout(() => onCompleteRef.current(), 600)
       return () => clearTimeout(t)
     }
-  }, [aDone, bDone])
+  }, [done])
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center px-8">
@@ -150,7 +144,7 @@ export default function AnalyzingView({
         <p className="text-sm mt-2" style={{ color: "rgba(255,255,255,0.4)" }}>
           {error
             ? "The backend rejected this run. Details below."
-            : "Both sessions are being processed in parallel through TRIBE v2"}
+            : "Reading the demo through TRIBE v2"}
         </p>
       </motion.div>
 
@@ -159,7 +153,7 @@ export default function AnalyzingView({
         <motion.div
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
-          className="w-full max-w-3xl mb-8 p-5 rounded-2xl"
+          className="w-full max-w-2xl mb-8 p-5 rounded-2xl"
           style={{
             background: "rgba(255,107,107,0.06)",
             border: "1px solid rgba(255,107,107,0.25)",
@@ -204,11 +198,10 @@ export default function AnalyzingView({
         </motion.div>
       )}
 
-      {/* Panels */}
+      {/* Panel */}
       {!error && (
-        <div className="flex gap-6 w-full max-w-3xl">
-          <AnalyzingPanel version="A" videoFile={videoFiles.a} state={panelA} isResolved={isResolved} />
-          <AnalyzingPanel version="B" videoFile={videoFiles.b} state={panelB} isResolved={isResolved} />
+        <div className="w-full max-w-2xl">
+          <AnalyzingPanel videoFile={videoFile} state={panel} isResolved={isResolved} />
         </div>
       )}
 
@@ -222,7 +215,7 @@ export default function AnalyzingView({
         >
           {isResolved
             ? "Response received — finalizing UI"
-            : "Pipeline takes 12–25s end-to-end (TRIBE GPU + Gemini)"}
+            : "Pipeline takes ~6–13s end-to-end (TRIBE GPU + Gemini)"}
         </motion.p>
       )}
     </div>
@@ -230,14 +223,14 @@ export default function AnalyzingView({
 }
 
 interface AnalyzingPanelProps {
-  version: "A" | "B"
   videoFile: File | null
   state: PanelState
   isResolved: boolean
 }
 
-function AnalyzingPanel({ version, videoFile, state, isResolved }: AnalyzingPanelProps) {
-  const accent = version === "A" ? "#7C9CFF" : "#5CF2C5"
+const ACCENT = "#7C9CFF"
+
+function AnalyzingPanel({ videoFile, state, isResolved }: AnalyzingPanelProps) {
   const { stageIndex, progress, done } = state
   const videoUrlRef = useRef<string | null>(null)
 
@@ -251,19 +244,15 @@ function AnalyzingPanel({ version, videoFile, state, isResolved }: AnalyzingPane
 
   return (
     <motion.div
-      className="flex-1 panel rounded-2xl p-6 flex flex-col gap-5"
+      className="panel rounded-2xl p-6 flex flex-col gap-5"
       initial={{ opacity: 0, y: 24 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ delay: version === "B" ? 0.15 : 0 }}
     >
-      {/* Version badge */}
+      {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <div className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold"
-            style={{ background: `${accent}18`, color: accent }}>
-            {version}
-          </div>
-          <span className="text-sm font-medium" style={{ color: "#e8eaf0" }}>Version {version}</span>
+          <div className="w-2 h-2 rounded-full" style={{ background: ACCENT }} />
+          <span className="text-sm font-medium" style={{ color: "#e8eaf0" }}>Analyzing demo</span>
         </div>
         {done && (
           <motion.div
@@ -287,7 +276,7 @@ function AnalyzingPanel({ version, videoFile, state, isResolved }: AnalyzingPane
           <video src={videoUrlRef.current} className="w-full h-full object-cover opacity-60" muted preload="metadata" />
         ) : (
           <div className="w-full h-full flex items-center justify-center">
-            <span className="text-4xl font-light" style={{ color: `${accent}25` }}>{version}</span>
+            <span className="text-4xl font-light" style={{ color: `${ACCENT}25` }}>·</span>
           </div>
         )}
 
@@ -295,7 +284,7 @@ function AnalyzingPanel({ version, videoFile, state, isResolved }: AnalyzingPane
           <div className="absolute inset-0 flex items-center justify-center" style={{ background: "rgba(11,15,20,0.4)" }}>
             <motion.div
               className="w-10 h-10 rounded-full"
-              style={{ border: `2px solid ${accent}30`, borderTopColor: accent }}
+              style={{ border: `2px solid ${ACCENT}30`, borderTopColor: ACCENT }}
               animate={{ rotate: 360 }}
               transition={{ duration: 1.2, repeat: Infinity, ease: "linear" }}
             />
@@ -309,7 +298,7 @@ function AnalyzingPanel({ version, videoFile, state, isResolved }: AnalyzingPane
           <motion.p
             key={done ? "done" : stageIndex}
             className="text-sm font-medium"
-            style={{ color: done ? "#5CF2C5" : accent }}
+            style={{ color: done ? "#5CF2C5" : ACCENT }}
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -6 }}
@@ -332,7 +321,7 @@ function AnalyzingPanel({ version, videoFile, state, isResolved }: AnalyzingPane
             >
               <motion.div
                 className="h-full rounded-full"
-                style={{ background: accent }}
+                style={{ background: ACCENT }}
                 initial={{ width: "0%" }}
                 animate={{
                   width: done || i < stageIndex ? "100%" : i === stageIndex ? `${progress}%` : "0%",
@@ -345,9 +334,9 @@ function AnalyzingPanel({ version, videoFile, state, isResolved }: AnalyzingPane
 
         <div className="flex items-center justify-between">
           <p className="text-xs" style={{ color: "rgba(255,255,255,0.3)" }}>
-            {done ? "Stage 4/4" : `Stage ${stageIndex + 1}/4`}
+            {done ? `Stage ${STAGES.length}/${STAGES.length}` : `Stage ${stageIndex + 1}/${STAGES.length}`}
           </p>
-          <p className="text-xs font-mono" style={{ color: accent }}>
+          <p className="text-xs font-mono" style={{ color: ACCENT }}>
             {overallProgress.toFixed(0)}%
           </p>
         </div>

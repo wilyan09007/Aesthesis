@@ -23,45 +23,28 @@ const Y_AXIS_W = 32
 const PLOT_LEFT = CHART_MARGIN_LEFT + Y_AXIS_W
 
 interface BrainChartProps {
-  framesA: Frame[]
-  framesB: Frame[]
-  insightsA?: Insight[]
-  insightsB?: Insight[]
+  frames: Frame[]
+  insights?: Insight[]
   currentTime: number
   onSeek: (t: number) => void
 }
-
-type ChartVersion = "A" | "B" | "both"
 
 interface ChartDataPoint {
   t_s: number
   [key: string]: number
 }
 
-type InsightEntry = { insight: Insight; v: "A" | "B" }
-
-function buildChartData(frames: Frame[], prefix: string): ChartDataPoint[] {
+function buildChartData(frames: Frame[]): ChartDataPoint[] {
   return frames.map((f) => {
     const point: ChartDataPoint = { t_s: f.t_s }
     for (const key of ROI_KEYS) {
-      point[`${prefix}_${key}`] = f.values[key]
+      point[key] = f.values[key]
     }
     return point
   })
 }
 
-function mergeChartData(framesA: Frame[], framesB: Frame[]): ChartDataPoint[] {
-  const mapB = new Map(framesB.map((f) => [f.t_s, f]))
-  return framesA.map((fa) => {
-    const fb = mapB.get(fa.t_s)
-    const point: ChartDataPoint = { t_s: fa.t_s }
-    for (const key of ROI_KEYS) {
-      point[`A_${key}`] = fa.values[key]
-      if (fb) point[`B_${key}`] = fb.values[key]
-    }
-    return point
-  })
-}
+const ACCENT = "#7C9CFF"
 
 const ROITooltip = ({ active, payload, label }: {
   active?: boolean
@@ -78,7 +61,7 @@ const ROITooltip = ({ active, payload, label }: {
           <div key={entry.name} className="flex items-center justify-between gap-4">
             <div className="flex items-center gap-1.5">
               <div className="w-2 h-2 rounded-full" style={{ background: entry.color }} />
-              <span style={{ color: "rgba(255,255,255,0.6)" }}>{entry.name.replace(/^[AB]_/, "")}</span>
+              <span style={{ color: "rgba(255,255,255,0.6)" }}>{entry.name}</span>
             </div>
             <span className="font-mono" style={{ color: entry.color }}>{entry.value.toFixed(3)}</span>
           </div>
@@ -88,15 +71,13 @@ const ROITooltip = ({ active, payload, label }: {
   )
 }
 
-function InsightPopover({ entry, containerWidth, maxTime, onSeek }: {
-  entry: InsightEntry
+function InsightPopover({ insight, containerWidth, maxTime, onSeek }: {
+  insight: Insight
   containerWidth: number
   maxTime: number
   onSeek: (t: number) => void
 }) {
-  const { insight, v } = entry
   const [t0, t1] = insight.timestamp_range_s
-  const accent = v === "A" ? "#7C9CFF" : "#5CF2C5"
   const plotWidth = containerWidth - PLOT_LEFT - CHART_MARGIN_RIGHT
   const midX = PLOT_LEFT + (((t0 + t1) / 2) / maxTime) * plotWidth
   const POPOVER_W = 320
@@ -115,16 +96,12 @@ function InsightPopover({ entry, containerWidth, maxTime, onSeek }: {
         className="rounded-xl p-4 text-xs"
         style={{
           background: "rgba(9,12,18,0.98)",
-          border: `1px solid ${accent}40`,
+          border: `1px solid ${ACCENT}40`,
           backdropFilter: "blur(20px)",
-          boxShadow: `0 12px 40px rgba(0,0,0,0.6), 0 0 0 1px ${accent}10`,
+          boxShadow: `0 12px 40px rgba(0,0,0,0.6), 0 0 0 1px ${ACCENT}10`,
         }}
       >
         <div className="flex items-center gap-2 mb-3">
-          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold tracking-wide"
-            style={{ background: `${accent}18`, color: accent }}>
-            V{v}
-          </span>
           <span className="font-mono" style={{ color: "rgba(255,255,255,0.38)" }}>
             {t0.toFixed(1)}s – {t1.toFixed(1)}s
           </span>
@@ -134,11 +111,11 @@ function InsightPopover({ entry, containerWidth, maxTime, onSeek }: {
           {insight.ux_observation}
         </p>
 
-        <div className="flex items-start gap-2 pt-2.5" style={{ borderTop: `1px solid ${accent}20` }}>
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke={accent} strokeWidth="2.5" className="shrink-0 mt-0.5">
+        <div className="flex items-start gap-2 pt-2.5" style={{ borderTop: `1px solid ${ACCENT}20` }}>
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke={ACCENT} strokeWidth="2.5" className="shrink-0 mt-0.5">
             <path d="M5 12h14M12 5l7 7-7 7" />
           </svg>
-          <p className="leading-relaxed" style={{ color: accent }}>
+          <p className="leading-relaxed" style={{ color: ACCENT }}>
             {insight.recommendation}
           </p>
         </div>
@@ -151,8 +128,7 @@ function InsightPopover({ entry, containerWidth, maxTime, onSeek }: {
   )
 }
 
-export default function BrainChart({ framesA, framesB, insightsA, insightsB, currentTime, onSeek }: BrainChartProps) {
-  const [version, setVersion] = useState<ChartVersion>("A")
+export default function BrainChart({ frames, insights, currentTime, onSeek }: BrainChartProps) {
   const [activeKey, setActiveKey] = useState<string | null>(null)
   const [mouseTime, setMouseTime] = useState<number | null>(null)
   const [containerWidth, setContainerWidth] = useState(0)
@@ -168,26 +144,14 @@ export default function BrainChart({ framesA, framesB, insightsA, insightsB, cur
     return () => ro.disconnect()
   }, [])
 
-  const chartData = version === "both"
-    ? mergeChartData(framesA, framesB)
-    : version === "A"
-      ? buildChartData(framesA, "A")
-      : buildChartData(framesB, "B")
+  const chartData = buildChartData(frames)
+  const maxTime = frames.length > 0 ? frames[frames.length - 1].t_s : 0
 
-  const maxTime = framesA.length > 0 ? framesA[framesA.length - 1].t_s : 0
+  const visibleInsights = insights ?? []
 
-  const visibleInsights: InsightEntry[] = [
-    ...(insightsA && (version === "A" || version === "both")
-      ? insightsA.map(ins => ({ insight: ins, v: "A" as const }))
-      : []),
-    ...(insightsB && (version === "B" || version === "both")
-      ? insightsB.map(ins => ({ insight: ins, v: "B" as const }))
-      : []),
-  ]
-
-  const activeInsightEntry = mouseTime !== null
+  const activeInsight = mouseTime !== null
     ? (visibleInsights.find(
-        ({ insight }) => mouseTime >= insight.timestamp_range_s[0] && mouseTime <= insight.timestamp_range_s[1]
+        (ins) => mouseTime >= ins.timestamp_range_s[0] && mouseTime <= ins.timestamp_range_s[1]
       ) ?? null)
     : null
 
@@ -196,9 +160,9 @@ export default function BrainChart({ framesA, framesB, insightsA, insightsB, cur
     const t = data?.activePayload?.[0]?.payload?.t_s as number | undefined
     if (t === undefined) return
     const hit = visibleInsights.find(
-      ({ insight }) => t >= insight.timestamp_range_s[0] && t <= insight.timestamp_range_s[1]
+      (ins) => t >= ins.timestamp_range_s[0] && t <= ins.timestamp_range_s[1]
     )
-    onSeek(hit ? hit.insight.timestamp_range_s[0] : t)
+    onSeek(hit ? hit.timestamp_range_s[0] : t)
   }, [onSeek, visibleInsights])
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -206,8 +170,6 @@ export default function BrainChart({ framesA, framesB, insightsA, insightsB, cur
     const t = data?.activePayload?.[0]?.payload?.t_s
     setMouseTime(typeof t === "number" ? t : null)
   }, [])
-
-  const prefixes = version === "both" ? ["A", "B"] : [version]
 
   return (
     <div className="panel rounded-2xl p-6">
@@ -218,23 +180,6 @@ export default function BrainChart({ framesA, framesB, insightsA, insightsB, cur
           <p className="text-xs mt-0.5" style={{ color: "rgba(255,255,255,0.35)" }}>
             8 ROI signals · hover shaded regions for insights · click to seek
           </p>
-        </div>
-
-        <div className="flex rounded-lg overflow-hidden" style={{ border: "1px solid rgba(255,255,255,0.08)" }}>
-          {(["A", "B", "both"] as ChartVersion[]).map((v) => (
-            <button
-              key={v}
-              onClick={() => setVersion(v)}
-              className="px-3 py-1.5 text-xs font-medium transition-all"
-              style={{
-                background: version === v ? "rgba(124,156,255,0.15)" : "transparent",
-                color: version === v ? "#7C9CFF" : "rgba(255,255,255,0.35)",
-                borderRight: v !== "both" ? "1px solid rgba(255,255,255,0.08)" : "none",
-              }}
-            >
-              {v === "both" ? "A+B" : `Version ${v}`}
-            </button>
-          ))}
         </div>
       </div>
 
@@ -263,7 +208,7 @@ export default function BrainChart({ framesA, framesB, insightsA, insightsB, cur
             onClick={handleClick}
             onMouseMove={handleMouseMove}
             onMouseLeave={() => setMouseTime(null)}
-            style={{ cursor: activeInsightEntry ? "pointer" : "crosshair" }}
+            style={{ cursor: activeInsight ? "pointer" : "crosshair" }}
           >
             <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
             <XAxis
@@ -283,7 +228,7 @@ export default function BrainChart({ framesA, framesB, insightsA, insightsB, cur
               tickLine={false}
               width={Y_AXIS_W}
             />
-            <Tooltip content={activeInsightEntry ? () => null : <ROITooltip />} />
+            <Tooltip content={activeInsight ? () => null : <ROITooltip />} />
             <ReferenceLine
               x={currentTime}
               stroke="rgba(255,255,255,0.5)"
@@ -292,19 +237,15 @@ export default function BrainChart({ framesA, framesB, insightsA, insightsB, cur
             />
 
             {/* Insight range bands */}
-            {visibleInsights.map(({ insight, v }, i) => {
-              const isActive = activeInsightEntry?.insight === insight
+            {visibleInsights.map((insight, i) => {
+              const isActive = activeInsight === insight
               return (
                 <ReferenceArea
-                  key={`ins_${v}_${i}`}
+                  key={`ins_${i}`}
                   x1={insight.timestamp_range_s[0]}
                   x2={insight.timestamp_range_s[1]}
-                  fill={
-                    isActive
-                      ? v === "A" ? "rgba(124,156,255,0.2)" : "rgba(92,242,197,0.15)"
-                      : v === "A" ? "rgba(124,156,255,0.07)" : "rgba(92,242,197,0.05)"
-                  }
-                  stroke={v === "A" ? "rgba(124,156,255,0.25)" : "rgba(92,242,197,0.2)"}
+                  fill={isActive ? "rgba(124,156,255,0.2)" : "rgba(124,156,255,0.07)"}
+                  stroke="rgba(124,156,255,0.25)"
                   strokeWidth={isActive ? 1 : 0}
                   strokeDasharray="2 2"
                   ifOverflow="hidden"
@@ -312,32 +253,29 @@ export default function BrainChart({ framesA, framesB, insightsA, insightsB, cur
               )
             })}
 
-            {prefixes.flatMap((prefix) =>
-              ROI_KEYS.map((key) => (
-                <Line
-                  key={`${prefix}_${key}`}
-                  type="monotone"
-                  dataKey={`${prefix}_${key}`}
-                  name={`${prefix}_${ROI_LABELS[key]}`}
-                  stroke={ROI_COLORS[key]}
-                  strokeWidth={activeKey === key ? 2 : 1.5}
-                  strokeDasharray={prefix === "B" && version === "both" ? "4 2" : undefined}
-                  dot={false}
-                  activeDot={{ r: 4, strokeWidth: 0 }}
-                  opacity={activeKey === null || activeKey === key ? 1 : 0.2}
-                  isAnimationActive={false}
-                />
-              ))
-            )}
+            {ROI_KEYS.map((key) => (
+              <Line
+                key={key}
+                type="monotone"
+                dataKey={key}
+                name={ROI_LABELS[key]}
+                stroke={ROI_COLORS[key]}
+                strokeWidth={activeKey === key ? 2 : 1.5}
+                dot={false}
+                activeDot={{ r: 4, strokeWidth: 0 }}
+                opacity={activeKey === null || activeKey === key ? 1 : 0.2}
+                isAnimationActive={false}
+              />
+            ))}
           </LineChart>
         </ResponsiveContainer>
 
         {/* Insight popover — appears above chart at insight midpoint */}
         <AnimatePresence>
-          {activeInsightEntry && containerWidth > 0 && (
+          {activeInsight && containerWidth > 0 && (
             <InsightPopover
-              key={`${activeInsightEntry.v}_${activeInsightEntry.insight.timestamp_range_s[0]}`}
-              entry={activeInsightEntry}
+              key={activeInsight.timestamp_range_s[0]}
+              insight={activeInsight}
               containerWidth={containerWidth}
               maxTime={maxTime}
               onSeek={onSeek}

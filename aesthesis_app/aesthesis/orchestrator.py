@@ -1,19 +1,20 @@
 """End-to-end orchestrator for /api/analyze.
 
-Sequence (DESIGN.md §3, Step 2 panel — serial per D6):
-    1. validate both MP4s (parallel — ffmpeg.probe is fast)
-    2. POST video A to TRIBE /process_video_timeline (await ~3-8s)
-    3. POST video B to TRIBE /process_video_timeline (await ~3-8s)
-    4. extract events for A and B (deterministic, ~10ms each)
-    5. extract per-event screenshots
-    6. Gemini insight call A (await ~1-3s)
-    7. Gemini insight call B (await ~1-3s)
-    8. compute aggregate metrics
-    9. Gemini verdict call (await ~1-2s)
-   10. assemble AnalyzeResponse via output_builder
+Sequence (DESIGN.md §3 / §17 — single-video pipeline):
+    1. validate the MP4
+    2. POST video to TRIBE /process_video_timeline (await ~3-8s)
+    3. extract events (deterministic, ~10ms)
+    4. extract per-event screenshots
+    5. Gemini insight call (await ~1-3s)
+    6. compute absolute aggregate metrics
+    7. Gemini overall-assessment call (await ~1-2s)
+    8. assemble AnalyzeResponse via output_builder
 
-Total wall time: ~12-25s for two 30s clips. Verbose log lines emit at
-every boundary so a slow run is easy to diagnose.
+Total wall time: ~6-13s for a 30s clip. Verbose log lines emit at every
+boundary so a slow run is easy to diagnose.
+
+Pre-pivot this took ``video_a`` + ``video_b`` and ran TRIBE serially
+(D6) on both. The pivot to single-video collapsed it — see DESIGN.md §17.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ from .schemas import AnalyzeResponse, Event
 from .screenshots import extract_frame
 from .synthesizer import synthesize
 from .tribe_client import TribeClient
-from .validation import ValidationResult, validate_upload
+from .validation import validate_upload
 
 log = logging.getLogger(__name__)
 
@@ -42,25 +43,22 @@ async def _attach_screenshots(
     *,
     work_dir: Path,
     run_id: str,
-    version: str,
 ) -> None:
-    """Mutates `events` in place — attaches `.screenshot_path` for every
+    """Mutates ``events`` in place — attaches ``.screenshot_path`` for every
     event whose timestamp we can extract a frame for."""
     work_dir.mkdir(parents=True, exist_ok=True)
     log.debug(
         "extracting screenshots",
-        extra={"step": "screenshots", "run_id": run_id, "version": version,
-               "n_events": len(events)},
+        extra={"step": "screenshots", "run_id": run_id, "n_events": len(events)},
     )
 
     def _extract(e: Event) -> None:
-        out = work_dir / f"{version.lower()}_t{e.timestamp_s:.2f}.jpg"
+        out = work_dir / f"t{e.timestamp_s:.2f}.jpg"
         path = extract_frame(video, e.timestamp_s, out)
         if path is not None:
             e.screenshot_path = str(path)
 
     # ffmpeg work is CPU-bound and short; run sequentially in this thread.
-    # Doing it on a thread pool would only matter if the cap is much higher.
     for e in events:
         try:
             _extract(e)
@@ -71,8 +69,7 @@ async def _attach_screenshots(
 async def run_analysis(
     *,
     cfg: AppConfig,
-    video_a: Path,
-    video_b: Path,
+    video: Path,
     goal: str | None = None,
     run_id: str | None = None,
 ) -> AnalyzeResponse:
@@ -80,46 +77,36 @@ async def run_analysis(
     log_extra = {"run_id": rid, "step": "orchestrator"}
     log.info(
         "analysis begin",
-        extra={**log_extra, "video_a": str(video_a), "video_b": str(video_b),
+        extra={**log_extra, "video": str(video),
                "goal": goal, "tribe_url": cfg.tribe_service_url},
     )
 
     overall_t0 = time.perf_counter()
 
     # ── Step 1: validate ────────────────────────────────────────────────
-    val_a, val_b = await asyncio.gather(
-        asyncio.to_thread(validate_upload, video_a, cfg),
-        asyncio.to_thread(validate_upload, video_b, cfg),
-    )
-    if not val_a.ok:
-        raise OrchestratorError(field="video_a", message=val_a.error or "invalid")
-    if not val_b.ok:
-        raise OrchestratorError(field="video_b", message=val_b.error or "invalid")
+    val = await asyncio.to_thread(validate_upload, video, cfg)
+    if not val.ok:
+        raise OrchestratorError(field="video", message=val.error or "invalid")
     log.info(
-        "both videos validated",
-        extra={**log_extra,
-               "duration_a": val_a.duration_s, "duration_b": val_b.duration_s},
+        "video validated",
+        extra={**log_extra, "duration_s": val.duration_s},
     )
 
-    # ── Steps 2-3: TRIBE serial (D6) ────────────────────────────────────
+    # ── Step 2: TRIBE ────────────────────────────────────────────────────
     client = TribeClient(cfg.tribe_service_url, timeout_s=cfg.tribe_request_timeout_s)
-    log.info("posting to TRIBE: video A", extra={**log_extra, "version": "A"})
-    timeline_a = await client.process_video_timeline(video_a, run_id=rid)
-    log.info("posting to TRIBE: video B", extra={**log_extra, "version": "B"})
-    timeline_b = await client.process_video_timeline(video_b, run_id=rid)
+    log.info("posting to TRIBE", extra=log_extra)
+    timeline = await client.process_video_timeline(video, run_id=rid)
 
-    # ── Step 4: events ──────────────────────────────────────────────────
-    events_a = extract_events(timeline_a, "A")
-    events_b = extract_events(timeline_b, "B")
+    # ── Step 3: events ──────────────────────────────────────────────────
+    events = extract_events(timeline)
 
-    # ── Step 5: screenshots ─────────────────────────────────────────────
+    # ── Step 4: screenshots ─────────────────────────────────────────────
     work_dir = cfg.upload_dir / rid / "frames"
-    await _attach_screenshots(events_a, video_a, work_dir=work_dir, run_id=rid, version="A")
-    await _attach_screenshots(events_b, video_b, work_dir=work_dir, run_id=rid, version="B")
+    await _attach_screenshots(events, video, work_dir=work_dir, run_id=rid)
 
-    # ── Steps 6-9: Gemini ───────────────────────────────────────────────
+    # ── Steps 5-7: Gemini (insights + overall assessment) ───────────────
     synth = await synthesize(
-        events_a, events_b, timeline_a, timeline_b,
+        events, timeline,
         goal=goal, cfg=cfg, run_id=rid,
     )
 
@@ -127,19 +114,19 @@ async def run_analysis(
 
     response = build_response(
         run_id=rid, goal=goal,
-        timeline_a=timeline_a, timeline_b=timeline_b,
-        duration_a=val_a.duration_s, duration_b=val_b.duration_s,
-        events_a=events_a, events_b=events_b,
-        insights_a=synth.insights_a, insights_b=synth.insights_b,
+        timeline=timeline,
+        duration_s=val.duration_s,
+        events=events,
+        insights=synth.insights,
         aggregate_metrics=synth.aggregate_metrics,
-        verdict=synth.verdict,
+        overall_assessment=synth.overall_assessment,
         elapsed_ms=elapsed_ms,
     )
 
     log.info(
         "analysis done",
         extra={**log_extra, "elapsed_ms": round(elapsed_ms, 2),
-               "winner": synth.verdict.winner},
+               "n_events": len(events), "n_insights": len(synth.insights)},
     )
     return response
 

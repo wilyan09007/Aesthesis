@@ -2,10 +2,13 @@
 
 Endpoints:
     GET  /health           — liveness + downstream TRIBE liveness
-    POST /api/analyze      — the load-bearing endpoint
+    POST /api/analyze      — the load-bearing endpoint (single video)
 
-DESIGN.md §10 Q11: multipart upload to this endpoint, written to a tmp dir,
-then forwarded by the orchestrator to the TRIBE service.
+DESIGN.md §10 Q11 / §17: multipart upload of a single MP4, written to a
+tmp dir, then forwarded by the orchestrator to the TRIBE service.
+
+Pre-pivot this accepted ``video_a`` + ``video_b`` and returned an A/B
+comparison. The pivot to single-video collapsed it — see DESIGN.md §17.
 """
 
 from __future__ import annotations
@@ -32,11 +35,10 @@ log = get_logger(__name__)
 
 app = FastAPI(
     title="Aesthesis backend",
-    version="0.1.0.0",
+    version="0.2.0.0",
     description=(
-        "Brain-judged A/B comparison via TRIBE v2. Step 2 (Assess) "
-        "backend — accepts two MP4 uploads, returns the full "
-        "results-page JSON."
+        "Brain-grounded UX analysis via TRIBE v2. Step 2 (Assess) backend "
+        "— accepts a single MP4 upload, returns the full results-page JSON."
     ),
 )
 
@@ -108,41 +110,37 @@ async def health() -> dict[str, Any]:
 
 @app.post("/api/analyze")
 async def analyze(
-    video_a: UploadFile = File(..., description="MP4 for Version A"),
-    video_b: UploadFile = File(..., description="MP4 for Version B"),
+    video: UploadFile = File(..., description="MP4 of the demo to analyze"),
     goal: str | None = Form(default=None),
 ) -> JSONResponse:
     cfg = get_config()
     rid = str(uuid.uuid4())
     log_extra = {"run_id": rid, "step": "endpoint",
-                 "filename_a": video_a.filename,
-                 "filename_b": video_b.filename,
-                 "content_type_a": video_a.content_type,
-                 "content_type_b": video_b.content_type,
+                 # NOTE: don't use the key "filename" — it's a reserved
+                 # LogRecord attribute (Python logging crashes with
+                 # "Attempt to overwrite 'filename' in LogRecord").
+                 "video_filename": video.filename,
+                 "content_type": video.content_type,
                  "goal_present": goal is not None}
     log.info("/api/analyze received", extra=log_extra)
 
-    # Persist both uploads to disk under cfg.upload_dir / run_id / .
+    # Persist the upload under cfg.upload_dir / run_id / .
     run_dir = cfg.upload_dir / rid
     run_dir.mkdir(parents=True, exist_ok=True)
-    path_a = run_dir / "a.mp4"
-    path_b = run_dir / "b.mp4"
+    path = run_dir / "video.mp4"
 
     t0 = time.perf_counter()
     try:
-        for fh, path in ((video_a, path_a), (video_b, path_b)):
-            with path.open("wb") as out:
-                shutil.copyfileobj(fh.file, out)
+        with path.open("wb") as out:
+            shutil.copyfileobj(video.file, out)
         log.debug(
-            "uploads persisted",
-            extra={**log_extra,
-                   "size_a": path_a.stat().st_size, "size_b": path_b.stat().st_size,
+            "upload persisted",
+            extra={**log_extra, "size_bytes": path.stat().st_size,
                    "elapsed_ms": round((time.perf_counter() - t0) * 1000, 2)},
         )
 
         response = await run_analysis(
-            cfg=cfg, video_a=path_a, video_b=path_b,
-            goal=goal, run_id=rid,
+            cfg=cfg, video=path, goal=goal, run_id=rid,
         )
         return JSONResponse(
             response.model_dump(mode="json"),
@@ -166,14 +164,13 @@ async def analyze(
     finally:
         if cfg.cleanup_uploads:
             try:
-                # Wait briefly so any frame-extraction child process can finish.
                 shutil.rmtree(run_dir, ignore_errors=True)
-                log.debug("uploads cleaned up", extra=log_extra)
+                log.debug("upload cleaned up", extra=log_extra)
             except Exception:  # noqa: BLE001
                 log.warning("upload cleanup failed", exc_info=True, extra=log_extra)
 
 
 def make_app() -> FastAPI:
-    """Hook for `uvicorn aesthesis.main:make_app --factory`. Identical to
-    importing the module-level `app`."""
+    """Hook for ``uvicorn aesthesis.main:make_app --factory``. Identical to
+    importing the module-level ``app``."""
     return app

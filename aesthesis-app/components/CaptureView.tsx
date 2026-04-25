@@ -11,13 +11,12 @@ interface CaptureViewProps {
 }
 
 export default function CaptureView({ onContinue, onBack }: CaptureViewProps) {
-  const [urlA, setUrlA] = useState("")
-  const [urlB, setUrlB] = useState("")
+  const [url, setUrl] = useState("")
   const [goal, setGoal] = useState("")
   const [runId, setRunId] = useState<string | null>(null)
   const [isCapturing, setIsCapturing] = useState(false)
 
-  const canStart = urlA.trim() && urlB.trim()
+  const canStart = url.trim().length > 0
   const canContinue = runId !== null
 
   const handleStart = () => {
@@ -26,7 +25,7 @@ export default function CaptureView({ onContinue, onBack }: CaptureViewProps) {
   }
 
   const handleContinue = () => {
-    onContinue({ urlA, urlB, goal })
+    onContinue({ url, goal })
   }
 
   return (
@@ -49,7 +48,7 @@ export default function CaptureView({ onContinue, onBack }: CaptureViewProps) {
       </div>
 
       {/* Content */}
-      <div className="flex-1 flex flex-col max-w-5xl mx-auto w-full px-8 py-8 gap-8">
+      <div className="flex-1 flex flex-col max-w-3xl mx-auto w-full px-8 py-8 gap-8">
         {/* Inputs */}
         <motion.div
           className="panel rounded-2xl p-6"
@@ -57,11 +56,9 @@ export default function CaptureView({ onContinue, onBack }: CaptureViewProps) {
           animate={{ opacity: 1, y: 0 }}
         >
           <h2 className="text-lg font-medium mb-5" style={{ color: "#e8eaf0" }}>Configure Capture</h2>
-          <div className="grid grid-cols-2 gap-4 mb-4">
-            <InputField label="URL A" placeholder="https://version-a.example.com" value={urlA} onChange={setUrlA} accent="#7C9CFF" />
-            <InputField label="URL B" placeholder="https://version-b.example.com" value={urlB} onChange={setUrlB} accent="#5CF2C5" />
-          </div>
-          <InputField label="Goal (optional)" placeholder="e.g. complete the signup flow" value={goal} onChange={setGoal} accent="#7C9CFF" />
+          <InputField label="Demo URL" placeholder="https://your-demo.example.com" value={url} onChange={setUrl} />
+          <div className="h-3" />
+          <InputField label="Goal (optional)" placeholder="e.g. complete the signup flow" value={goal} onChange={setGoal} />
 
           <div className="flex items-center gap-3 mt-5">
             <motion.button
@@ -82,34 +79,32 @@ export default function CaptureView({ onContinue, onBack }: CaptureViewProps) {
             {isCapturing && (
               <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex items-center gap-2">
                 <div className="w-1.5 h-1.5 rounded-full" style={{ background: "#FF6B6B", animation: "pulse-glow 1s infinite" }} />
-                <span className="text-xs" style={{ color: "rgba(255,255,255,0.4)" }}>Recording live sessions…</span>
+                <span className="text-xs" style={{ color: "rgba(255,255,255,0.4)" }}>Recording live session…</span>
               </motion.div>
             )}
           </div>
         </motion.div>
 
-        {/* Live panels */}
+        {/* Live panel */}
         {runId && (
           <motion.div
-            className="flex gap-4 flex-1"
+            className="flex-1"
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.15 }}
           >
-            <LiveStreamPanel runId={runId} version="A" />
-            <LiveStreamPanel runId={runId} version="B" />
+            <LiveStreamPanel runId={runId} />
           </motion.div>
         )}
 
         {!runId && (
           <motion.div
-            className="flex gap-4 flex-1"
+            className="flex-1"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             transition={{ delay: 0.2 }}
           >
-            <EmptyPanel version="A" />
-            <EmptyPanel version="B" />
+            <EmptyPanel />
           </motion.div>
         )}
 
@@ -117,7 +112,7 @@ export default function CaptureView({ onContinue, onBack }: CaptureViewProps) {
         <div className="flex justify-end">
           <motion.button
             onClick={handleContinue}
-            disabled={!canContinue && !urlA}
+            disabled={!canContinue && !url}
             className="flex items-center gap-2 px-6 py-3 rounded-xl text-sm font-medium"
             style={{
               background: "rgba(92,242,197,0.1)",
@@ -139,13 +134,13 @@ export default function CaptureView({ onContinue, onBack }: CaptureViewProps) {
   )
 }
 
-function InputField({ label, placeholder, value, onChange, accent }: {
+function InputField({ label, placeholder, value, onChange }: {
   label: string
   placeholder: string
   value: string
   onChange: (v: string) => void
-  accent: string
 }) {
+  const accent = "#7C9CFF"
   return (
     <div>
       <label className="block text-xs mb-1.5 tracking-wide" style={{ color: "rgba(255,255,255,0.4)" }}>{label}</label>
@@ -167,12 +162,10 @@ function InputField({ label, placeholder, value, onChange, accent }: {
   )
 }
 
-function EmptyPanel({ version }: { version: "A" | "B" }) {
-  const color = version === "A" ? "#7C9CFF" : "#5CF2C5"
+function EmptyPanel() {
   return (
-    <div className="flex-1 rounded-xl panel flex items-center justify-center aspect-video">
+    <div className="rounded-xl panel flex items-center justify-center aspect-video">
       <div className="text-center">
-        <div className="text-3xl font-light mb-2" style={{ color: `${color}30` }}>{version}</div>
         <p className="text-xs" style={{ color: "rgba(255,255,255,0.2)" }}>Stream will appear here</p>
       </div>
     </div>

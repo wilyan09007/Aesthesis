@@ -1,14 +1,14 @@
 # Aesthesis — backend
 
-Brain-judged A/B comparison via TRIBE v2. This repo hosts the **backend Step 2 (Assess) pipeline**: take two MP4 screen recordings, return a side-by-side analysis (per-second neural timeline + insights + verdict) ready for the results UI to render.
+Brain-grounded UX analysis via TRIBE v2. **Demo anything. See the analysis.** This repo hosts the **backend Step 2 (Assess) pipeline**: take one MP4 screen recording, return a per-second neural timeline + timestamped insights + an overall assessment, ready for the results UI to render.
+
+> **Pivot note (2026-04-25):** Aesthesis was an A/B-comparison product up to v0.2.0. As of v0.3.0 it's single-video. See [`DESIGN.md`](./DESIGN.md) §17 for the full diff.
 
 The full product spec lives in [`DESIGN.md`](./DESIGN.md). Implementation assumptions and research notes are in [`ASSUMPTIONS.md`](./ASSUMPTIONS.md).
 
 ```
-[ MP4 A ] ─┐                ┌── /process_video_timeline ──> brain_a.json ─┐
-           ├──> /api/analyze ─┤                                              ├─> Gemini ──> insights + verdict ──> results JSON
-[ MP4 B ] ─┘  (this repo)    └── /process_video_timeline ──> brain_b.json ─┘
-                                  TRIBE service (this repo, GPU)              Aesthesis app (this repo, CPU)
+[ MP4 ] ─> /api/analyze ─> /process_video_timeline ─> brain.json ─> Gemini ─> insights + overall_assessment ─> results JSON
+            (this repo)     TRIBE service (this repo, GPU)            Aesthesis app (this repo, CPU)
 ```
 
 ## Two services
@@ -40,8 +40,7 @@ uvicorn aesthesis.main:app --port 8000
 
 # Smoke check
 curl -X POST localhost:8000/api/analyze \
-  -F "video_a=@demo_a.mp4" \
-  -F "video_b=@demo_b.mp4" \
+  -F "video=@demo.mp4" \
   -F "goal=evaluate the signup flow"
 ```
 
@@ -56,8 +55,7 @@ TRIBE_SERVICE_URL=... GEMINI_API_KEY=... pytest
 Every step in both services emits structured logs via stdlib `logging` with `extra={...}` fields. Set `LOG_LEVEL=DEBUG` to surface every shape check, every external call, every timing measurement. Useful trace IDs:
 
 - `run_id` — propagates across both services for the lifetime of one `/api/analyze` call
-- `version` — `"A"` or `"B"`, identifies which video a log line is about
-- `step` — pipeline phase (`validate`, `tribe`, `events`, `gemini.insights`, `gemini.verdict`, `output`)
+- `step` — pipeline phase (`validate`, `tribe`, `events`, `gemini.insights`, `gemini.assessment`, `output`)
 
 ```bash
 LOG_LEVEL=DEBUG uvicorn aesthesis.main:app

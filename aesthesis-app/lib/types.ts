@@ -2,9 +2,10 @@
 // The Pydantic schema is the single source of truth. If you change a field
 // here without changing it there (or vice versa), the request will fail
 // loudly the first time it hits the network.
-
-export type VersionTag = "A" | "B"
-export type Winner = VersionTag | "tie"
+//
+// Single-video pivot (DESIGN.md §17): no A/B split. One video in, one
+// AnalyzeResponse out. The legacy VersionTag / Verdict / VersionResult
+// types are gone.
 
 export type EventType =
   | "spike"
@@ -41,7 +42,6 @@ export type Frame = {
 // ── Wire types (mirror schemas.py exactly) ─────────────────────────────────
 
 export type Insight = {
-  version: VersionTag
   timestamp_range_s: [number, number]
   ux_observation: string
   recommendation: string
@@ -50,7 +50,6 @@ export type Insight = {
 }
 
 export type Event = {
-  version: VersionTag
   timestamp_s: number
   type: EventType
   primary_roi: string | null
@@ -63,17 +62,14 @@ export type Event = {
 
 export type AggregateMetric = {
   name: string
-  a: number
-  b: number
-  edge: Winner
-  edge_description: string | null
+  value: number
+  interpretation: string | null
 }
 
-export type Verdict = {
-  winner: Winner
+export type OverallAssessment = {
   summary_paragraph: string
-  version_a_strengths: string[]
-  version_b_strengths: string[]
+  top_strengths: string[]
+  top_concerns: string[]
   decisive_moment: string
 }
 
@@ -86,15 +82,6 @@ export type TimelineSummary = {
   processing_time_ms: number
 }
 
-export type VersionResult = {
-  version: VersionTag
-  video_url: string | null
-  duration_s: number
-  timeline: TimelineSummary
-  events: Event[]
-  insights: Insight[]
-}
-
 export type AnalyzeRequestMeta = {
   goal: string | null
   run_id: string
@@ -103,10 +90,13 @@ export type AnalyzeRequestMeta = {
 
 export type AnalyzeResponse = {
   meta: AnalyzeRequestMeta
-  a: VersionResult
-  b: VersionResult
+  video_url: string | null
+  duration_s: number
+  timeline: TimelineSummary
+  events: Event[]
+  insights: Insight[]
   aggregate_metrics: AggregateMetric[]
-  verdict: Verdict
+  overall_assessment: OverallAssessment
   elapsed_ms: number
 }
 
@@ -121,19 +111,13 @@ export type ValidationFailure = {
 export type AppState = "landing" | "capture" | "assess" | "analyzing" | "results"
 
 export type CaptureInputs = {
-  urlA: string
-  urlB: string
+  url: string
   goal: string
 }
 
-export type VideoFiles = {
-  a: File | null
-  b: File | null
-}
-
 export type WSMessage =
-  | { type: "frame"; version: VersionTag; frame_b64: string }
-  | { type: "stream_degraded"; version: VersionTag }
+  | { type: "frame"; frame_b64: string }
+  | { type: "stream_degraded" }
 
 // ── ROI display constants ──────────────────────────────────────────────────
 

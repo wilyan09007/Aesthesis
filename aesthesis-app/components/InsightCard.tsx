@@ -6,12 +6,12 @@ import type { Insight } from "@/lib/types"
 interface InsightCardProps {
   insight: Insight
   index: number
-  version: "A" | "B"
   onSeek: (t: number) => void
 }
 
-export default function InsightCard({ insight, index, version, onSeek }: InsightCardProps) {
-  const accent = version === "A" ? "#7C9CFF" : "#5CF2C5"
+const ACCENT = "#7C9CFF"
+
+export default function InsightCard({ insight, index, onSeek }: InsightCardProps) {
   const [t0, t1] = insight.timestamp_range_s
 
   return (
@@ -27,7 +27,7 @@ export default function InsightCard({ insight, index, version, onSeek }: Insight
       onClick={() => onSeek(t0)}
       whileHover={{
         backgroundColor: "rgba(255,255,255,0.05)",
-        borderColor: `${accent}30`,
+        borderColor: `${ACCENT}30`,
         scale: 1.005,
       }}
       whileTap={{ scale: 0.998 }}
@@ -36,7 +36,7 @@ export default function InsightCard({ insight, index, version, onSeek }: Insight
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           <div className="flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-mono"
-            style={{ background: `${accent}12`, color: accent, border: `1px solid ${accent}25` }}>
+            style={{ background: `${ACCENT}12`, color: ACCENT, border: `1px solid ${ACCENT}25` }}>
             {t0.toFixed(1)}s – {t1.toFixed(1)}s
           </div>
         </div>
@@ -57,13 +57,13 @@ export default function InsightCard({ insight, index, version, onSeek }: Insight
       {/* Recommendation */}
       <div className="flex items-start gap-2">
         <div className="w-3.5 h-3.5 rounded-full flex items-center justify-center shrink-0 mt-0.5"
-          style={{ background: `${accent}15` }}>
-          <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke={accent} strokeWidth="2.5">
+          style={{ background: `${ACCENT}15` }}>
+          <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke={ACCENT} strokeWidth="2.5">
             <path d="M5 12h14" />
             <path d="M12 5l7 7-7 7" />
           </svg>
         </div>
-        <p className="text-xs leading-relaxed" style={{ color: accent, opacity: 0.8 }}>
+        <p className="text-xs leading-relaxed" style={{ color: ACCENT, opacity: 0.8 }}>
           {insight.recommendation}
         </p>
       </div>

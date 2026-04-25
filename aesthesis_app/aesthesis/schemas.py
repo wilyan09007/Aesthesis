@@ -1,12 +1,22 @@
 """Pydantic models for the public API and internal contracts.
 
-Two surfaces:
-- `AnalyzeResponse` is the JSON the frontend results page consumes.
-- `Insight`, `Verdict`, `Event` etc. are the internal Gemini-output / event
-  shapes — they appear inside `AnalyzeResponse` too, but the rest of the
-  pipeline uses them directly.
+Single-video pipeline (post-pivot, DESIGN.md §17):
 
-Schemas track DESIGN.md §4.5 input/output contracts verbatim.
+    POST /api/analyze      multipart {video, [goal]}
+        -> AnalyzeResponse {
+              meta, video_url, duration_s,
+              timeline, events, insights,
+              aggregate_metrics, overall_assessment,
+              elapsed_ms,
+           }
+
+The frontend's ``/results`` view consumes this exactly. The backend
+internal pipeline uses ``Event``, ``Insight``, ``AggregateMetric``,
+``OverallAssessment`` directly between modules.
+
+Pre-pivot history (A/B comparison) used a ``VersionTag = "A" | "B"``
+discriminator on every record + a ``Verdict`` block declaring a winner.
+That whole concept is gone — see DESIGN.md §17 for the rationale.
 """
 
 from __future__ import annotations
@@ -26,12 +36,9 @@ EventType = Literal[
     "bounce_risk",
 ]
 
-VersionTag = Literal["A", "B"]
-
 
 class Event(BaseModel):
     """Deterministic event extracted from a brain timeline."""
-    version: VersionTag
     timestamp_s: float
     type: EventType
     primary_roi: str | None = None
@@ -44,7 +51,6 @@ class Event(BaseModel):
 
 class Insight(BaseModel):
     """One Gemini insight per event (DESIGN.md §4.5 output schema)."""
-    version: VersionTag
     timestamp_range_s: tuple[float, float]
     ux_observation: str
     recommendation: str
@@ -53,19 +59,28 @@ class Insight(BaseModel):
 
 
 class AggregateMetric(BaseModel):
+    """Single absolute metric scored against this video.
+
+    Pre-pivot this carried a/b/edge for A/B comparison. Post-pivot every
+    metric is a self-contained `(name, value, interpretation)`. The
+    ``interpretation`` string is short human-facing context — the metric
+    is otherwise opaque to the frontend.
+    """
     name: str
-    a: float
-    b: float
-    edge: VersionTag | Literal["tie"]
-    edge_description: str | None = None
+    value: float
+    interpretation: str | None = None
 
 
-class Verdict(BaseModel):
-    """Output of the head-to-head verdict call (DESIGN.md §4.5 step 3)."""
-    winner: VersionTag | Literal["tie"]
+class OverallAssessment(BaseModel):
+    """Output of the second Gemini call — narrative summary of the demo.
+
+    Replaces the pre-pivot ``Verdict`` (which picked a winner between A and
+    B). The new shape narrates a single demo: holistic summary, what the
+    brain said worked, what it flagged, and the most memorable timestamp.
+    """
     summary_paragraph: str
-    version_a_strengths: list[str]
-    version_b_strengths: list[str]
+    top_strengths: list[str]
+    top_concerns: list[str]
     decisive_moment: str
 
 
@@ -84,15 +99,6 @@ class TimelineSummary(BaseModel):
     processing_time_ms: float = 0.0
 
 
-class VersionResult(BaseModel):
-    version: VersionTag
-    video_url: str | None = None
-    duration_s: float
-    timeline: TimelineSummary
-    events: list[Event]
-    insights: list[Insight]
-
-
 class AnalyzeRequestMeta(BaseModel):
     goal: str | None = None
     run_id: str
@@ -100,12 +106,15 @@ class AnalyzeRequestMeta(BaseModel):
 
 
 class AnalyzeResponse(BaseModel):
-    """Top-level result returned by `POST /api/analyze`."""
+    """Top-level result returned by ``POST /api/analyze`` (single-video)."""
     meta: AnalyzeRequestMeta
-    a: VersionResult
-    b: VersionResult
+    video_url: str | None = None
+    duration_s: float
+    timeline: TimelineSummary
+    events: list[Event]
+    insights: list[Insight]
     aggregate_metrics: list[AggregateMetric]
-    verdict: Verdict
+    overall_assessment: OverallAssessment
     elapsed_ms: float
 
 

@@ -1,12 +1,16 @@
 // Aesthesis backend client.
 //
-// One function: analyze(). Multipart POST to /api/analyze with the two
-// MP4s and an optional goal. Returns the parsed AnalyzeResponse.
+// One function: analyze(). Multipart POST to /api/analyze with the MP4 and
+// an optional goal. Returns the parsed AnalyzeResponse.
 //
-// Verbose console logging is intentional. The full pipeline takes 12-25s
+// Verbose console logging is intentional. The full pipeline takes ~6-13s
 // (TRIBE GPU + two Gemini calls) and a silent network tab is hostile to
 // debugging. Every log line includes the run_id when we have it so you
 // can grep across browser and server logs.
+//
+// Single-video pivot (DESIGN.md §17): the request body now sends one
+// `video` field instead of `video_a` + `video_b`. The legacy two-video
+// signature is gone.
 
 import type { AnalyzeResponse, ValidationFailure } from "./types"
 
@@ -32,8 +36,7 @@ export class AnalyzeError extends Error {
 }
 
 export type AnalyzeArgs = {
-  fileA: File
-  fileB: File
+  file: File
   goal?: string | null
   signal?: AbortSignal
 }
@@ -54,22 +57,19 @@ function logScope(rid: string | null) {
 }
 
 export async function analyze({
-  fileA,
-  fileB,
+  file,
   goal,
   signal,
 }: AnalyzeArgs): Promise<AnalyzeResponse> {
   const url = `${API_BASE_URL}/api/analyze`
   const fd = new FormData()
-  fd.append("video_a", fileA, fileA.name || "a.mp4")
-  fd.append("video_b", fileB, fileB.name || "b.mp4")
+  fd.append("video", file, file.name || "video.mp4")
   if (goal && goal.trim()) fd.append("goal", goal.trim())
 
   const log = logScope(null)
   log.info("analyze.begin", {
     url,
-    file_a: { name: fileA.name, size: fileA.size, type: fileA.type },
-    file_b: { name: fileB.name, size: fileB.size, type: fileB.type },
+    file: { name: file.name, size: file.size, type: file.type },
     goal_present: !!(goal && goal.trim()),
   })
 
@@ -150,18 +150,16 @@ export async function analyze({
   scoped.info("analyze.done", {
     elapsed_ms,
     server_elapsed_ms: serverElapsed,
-    n_insights_a: json.a?.insights?.length ?? 0,
-    n_insights_b: json.b?.insights?.length ?? 0,
-    n_events_a: json.a?.events?.length ?? 0,
-    n_events_b: json.b?.events?.length ?? 0,
-    winner: json.verdict?.winner,
+    n_insights: json.insights?.length ?? 0,
+    n_events: json.events?.length ?? 0,
+    n_metrics: json.aggregate_metrics?.length ?? 0,
   })
 
   return json
 }
 
 // Lightweight liveness probe — surfaces backend reachability without
-// actually starting a 25s analysis. Used for the dev banner and could
+// actually starting an analysis. Used for the dev banner and could
 // be reused in a /status route handler later.
 export async function pingHealth(signal?: AbortSignal): Promise<{
   ok: boolean

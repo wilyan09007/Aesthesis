@@ -2,18 +2,20 @@
 //
 // The backend ships TimelineSummary { roi_series: { roi_name: number[] }, tr_duration_s }
 // because that's compact on the wire. The chart wants Frame[] = [{ t_s, values }].
-// The Verdict on the wire is `summary_paragraph` (Pydantic field name, fixed by
-// DESIGN.md §4.5 step 3) but the panel component just needs a `summary` string.
 // We adapt once on receipt; components stay backend-agnostic.
+//
+// Single-video pivot (DESIGN.md §17): no A/B split. The OverallAssessment
+// replaces the legacy Verdict; the panel component just needs a `summary`
+// string + bullets. Per-frame derivation is unchanged.
 
 import type {
   AnalyzeResponse,
   Frame,
   Insight,
+  OverallAssessment,
   ROIKey,
   ROIValues,
   TimelineSummary,
-  Winner,
 } from "./types"
 import { ROI_KEYS } from "./types"
 
@@ -46,28 +48,19 @@ export function framesFromTimeline(timeline: TimelineSummary): Frame[] {
 // Shape ResultsView + its child components actually consume. Keeps the
 // view code small and oblivious to the wire schema.
 export type ResultsViewData = {
-  a: { frames: Frame[]; insights: Insight[]; duration_s: number }
-  b: { frames: Frame[]; insights: Insight[]; duration_s: number }
-  verdict: { winner: Winner; summary: string }
+  frames: Frame[]
+  insights: Insight[]
+  duration_s: number
+  assessment: OverallAssessment
   raw: AnalyzeResponse
 }
 
 export function adaptForResultsView(resp: AnalyzeResponse): ResultsViewData {
   return {
-    a: {
-      frames: framesFromTimeline(resp.a.timeline),
-      insights: resp.a.insights,
-      duration_s: resp.a.duration_s,
-    },
-    b: {
-      frames: framesFromTimeline(resp.b.timeline),
-      insights: resp.b.insights,
-      duration_s: resp.b.duration_s,
-    },
-    verdict: {
-      winner: resp.verdict.winner,
-      summary: resp.verdict.summary_paragraph,
-    },
+    frames: framesFromTimeline(resp.timeline),
+    insights: resp.insights,
+    duration_s: resp.duration_s,
+    assessment: resp.overall_assessment,
     raw: resp,
   }
 }

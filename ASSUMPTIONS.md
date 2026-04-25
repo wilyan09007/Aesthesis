@@ -4,6 +4,8 @@
 >
 > If you disagree with anything below, this is the file to argue with — DESIGN.md stays clean as the spec.
 
+> **Pivot note (2026-04-25):** Aesthesis pivoted from A/B comparison to single-video analysis. See DESIGN.md §17 for the new contract. Below, every "two videos" / "version A / version B" / "verdict" reference reflects the pre-pivot shape. The TRIBE service architecture (§2 onwards) is unchanged — it was always per-video.
+
 ## 1. What "ship the backend, second stage" was scoped to
 
 The user's request: *"backend only, entire second stage including mp4 to tribe v2 to analysis model to output page data."*

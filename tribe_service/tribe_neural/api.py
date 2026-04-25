@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import subprocess
 import tempfile
 import time
 import uuid
@@ -122,6 +123,77 @@ def _save_upload(file: UploadFile, run_id: str) -> Path:
     return out_path
 
 
+def _strip_audio_track(video_path: Path, run_id: str) -> Path:
+    """Produce a new MP4 next to ``video_path`` with the audio track removed.
+
+    Aesthesis is video-only and the audio strip is now the **sole** mechanism
+    keeping TRIBE off the audio path — no monkey-patch fallback exists. With
+    no audio stream in the input MP4:
+
+    1. ``ExtractAudioFromVideo`` (tribev2's first transform) produces zero
+       Audio events because moviepy reports ``video.audio is None``.
+    2. tribev2.main then prunes the audio and text extractors with
+       "Removing extractor … as there are no corresponding events".
+    3. The whisperx subprocess (the original 2:30 / 30-s bottleneck) and
+       the Wav2Vec-BERT raw-waveform encoder are never reached.
+
+    Uses ``ffmpeg -an -c:v copy`` so the video stream is *not* re-encoded
+    (sub-second on a 30 s clip). On any failure this **raises**
+    ``PipelineError`` rather than returning the original — silently
+    forwarding audio would re-introduce the whisperx bottleneck and
+    contradict the "no inner-workings touch" contract.
+    """
+    stripped = video_path.with_name(f"{video_path.stem}_noaudio{video_path.suffix}")
+    if stripped.exists():
+        log.debug("audio-stripped MP4 already at %s — reusing", stripped,
+                  extra={"step": "audio_strip", "run_id": run_id})
+        return stripped
+
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-i", str(video_path),
+        "-an",          # drop ALL audio streams
+        "-c:v", "copy",  # don't re-encode video
+        str(stripped),
+    ]
+    t = time.perf_counter()
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=30, check=False)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        log.error(
+            "audio strip failed (%s) — refusing to forward audio-laden video to TRIBE",
+            type(e).__name__,
+            extra={"step": "audio_strip", "run_id": run_id, "error": str(e)},
+        )
+        raise PipelineError(
+            f"audio strip failed ({type(e).__name__}: {e}); cannot run "
+            "TRIBE on a video that still contains an audio stream"
+        ) from e
+    if proc.returncode != 0 or not stripped.exists() or stripped.stat().st_size == 0:
+        stderr = proc.stderr.decode("utf-8", errors="replace")[:500] if proc.stderr else ""
+        log.error(
+            "audio strip failed (rc=%d) — refusing to forward audio-laden video to TRIBE. "
+            "stderr=%s",
+            proc.returncode, stderr,
+            extra={"step": "audio_strip", "run_id": run_id},
+        )
+        raise PipelineError(
+            f"audio strip failed (ffmpeg rc={proc.returncode}); cannot run "
+            f"TRIBE on a video that still contains an audio stream. stderr={stderr!r}"
+        )
+    log.info(
+        "audio stripped — video-only MP4 ready for tribev2",
+        extra={
+            "step": "audio_strip", "run_id": run_id,
+            "elapsed_ms": round((time.perf_counter() - t) * 1000.0, 2),
+            "original_bytes": video_path.stat().st_size,
+            "stripped_bytes": stripped.stat().st_size,
+            "input": str(video_path), "output": str(stripped),
+        },
+    )
+    return stripped
+
+
 # ─── Endpoints ───────────────────────────────────────────────────────────────
 
 @app.get("/health", response_model=HealthResponse)
@@ -153,9 +225,9 @@ async def process_video_timeline_endpoint(
     log_extra = {"run_id": rid, "endpoint": "process_video_timeline"}
 
     if video is not None and video.filename:
-        path = _save_upload(video, rid)
+        raw_path = _save_upload(video, rid)
     elif json_request is not None and json_request.video_path:
-        path = Path(json_request.video_path)
+        raw_path = Path(json_request.video_path)
         window_trs = json_request.window_trs
         step_trs = json_request.step_trs
     else:
@@ -164,9 +236,16 @@ async def process_video_timeline_endpoint(
             detail="Send either multipart `video` or JSON {video_path,...}.",
         )
 
+    # Aesthesis is video-only. Strip the audio track at the request
+    # boundary so tribev2's audio extractors (ExtractAudioFromVideo,
+    # ExtractWordsFromAudio, Wav2Vec-BERT) receive nothing audio-shaped.
+    # See _strip_audio_track docstring + DESIGN.md §17.
+    path = _strip_audio_track(raw_path, rid)
+
     log.info(
         "request received",
         extra={**log_extra, "video": str(path),
+               "raw_video": str(raw_path),
                "window_trs": window_trs, "step_trs": step_trs},
     )
     t0 = time.perf_counter()

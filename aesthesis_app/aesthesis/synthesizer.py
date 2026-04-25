@@ -1,12 +1,16 @@
-"""Insight Synthesizer (DESIGN.md §4.5).
+"""Insight Synthesizer (DESIGN.md §4.5, post-pivot §17).
 
-Two Gemini calls per A/B comparison:
-    1. Per-video insight call — Events + screenshots + goal -> insights JSON.
-    2. Verdict call — Aggregate metrics + per-version insights -> Verdict JSON.
+Two Gemini calls per analysis:
+    1. Per-event insights — Events + screenshots + goal -> insights JSON.
+    2. Overall assessment — Aggregate metrics + insights -> OverallAssessment.
 
 Failures from Gemini (missing dependency, missing key, malformed JSON,
-schema mismatch) raise `SynthesizerError`. The orchestrator surfaces these
+schema mismatch) raise ``SynthesizerError``. The orchestrator surfaces these
 as a 500 to the caller.
+
+Pre-pivot history: there used to be three calls (insights for A, insights
+for B, then a verdict that picked a winner). The pivot collapsed that to
+two single-subject calls — DESIGN.md §17.
 """
 
 from __future__ import annotations
@@ -14,13 +18,14 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
 from .config import AppConfig
-from .prompts import INSIGHT_PROMPT_TEMPLATE, VERDICT_PROMPT_TEMPLATE
-from .schemas import AggregateMetric, Event, Insight, Verdict, VersionTag
+from .prompts import ASSESSMENT_PROMPT_TEMPLATE, INSIGHT_PROMPT_TEMPLATE
+from .schemas import AggregateMetric, Event, Insight, OverallAssessment
 
 log = logging.getLogger(__name__)
 
@@ -31,16 +36,17 @@ class SynthesizerError(RuntimeError):
 
 @dataclass
 class SynthesisResult:
-    insights_a: list[Insight]
-    insights_b: list[Insight]
+    insights: list[Insight]
     aggregate_metrics: list[AggregateMetric]
-    verdict: Verdict
-    insights_calls_ms: float
-    verdict_call_ms: float
+    overall_assessment: OverallAssessment
+    insights_call_ms: float
+    assessment_call_ms: float
 
+
+# ─── Gemini plumbing ─────────────────────────────────────────────────────────
 
 def _strip_code_fence(text: str) -> str:
-    """Gemini in JSON mode usually returns raw JSON, but in `text` response
+    """Gemini in JSON mode usually returns raw JSON, but in ``text`` response
     mode it sometimes wraps the body in ```json ... ```. Trim that."""
     text = text.strip()
     if text.startswith("```"):
@@ -54,7 +60,7 @@ async def _call_gemini(prompt: str, *, cfg: AppConfig, model_name: str,
                        images: list[bytes] | None = None) -> dict:
     """Invoke Gemini and return the parsed JSON response.
 
-    `images` is a list of raw JPEG bytes. We pass them as inline image
+    ``images`` is a list of raw JPEG bytes. We pass them as inline image
     parts alongside the text prompt so Gemini can ground insights in the
     actual UI screenshots.
     """
@@ -107,22 +113,23 @@ def _serialize_event_for_prompt(e: Event) -> dict:
     }
 
 
+# ─── Step 1: per-event insights ──────────────────────────────────────────────
+
 async def _generate_insights(
     events: list[Event],
     *,
-    version: VersionTag,
     goal: str | None,
     cfg: AppConfig,
     run_id: str,
 ) -> list[Insight]:
-    """Call Gemini once per video. Returns list[Insight].
+    """Call Gemini once for the demo's events. Returns list[Insight].
 
-    Raises `SynthesizerError` if the call fails or produces zero valid
+    Raises ``SynthesizerError`` if the call fails or produces zero valid
     insights for a non-empty event list.
     """
     if not events:
         log.info("no events to synthesize — skipping Gemini",
-                 extra={"step": "gemini.insights", "version": version, "run_id": run_id})
+                 extra={"step": "gemini.insights", "run_id": run_id})
         return []
 
     events_serialized = [_serialize_event_for_prompt(e) for e in events]
@@ -130,7 +137,6 @@ async def _generate_insights(
     prompt = INSIGHT_PROMPT_TEMPLATE.format(
         goal=goal or "general first-impression evaluation",
         n_events=len(events),
-        version=version,
         events_json=events_json,
     )
 
@@ -152,30 +158,37 @@ async def _generate_insights(
     errors: list[str] = []
     for entry in raw.get("insights", []):
         try:
-            out.append(Insight(version=version, **{
-                k: v for k, v in entry.items() if k != "version"
-            }))
+            out.append(Insight(**entry))
         except Exception as e:  # noqa: BLE001
             errors.append(f"{entry}: {e}")
     if not out:
         raise SynthesizerError(
-            f"Gemini insight call (version={version}) returned 0 valid "
-            f"insights from {len(raw.get('insights', []))} entries. "
-            f"errors={errors}"
+            f"Gemini insight call returned 0 valid insights from "
+            f"{len(raw.get('insights', []))} entries. errors={errors}"
         )
     return out
 
 
-def _compute_aggregate_metrics(
-    timeline_a: dict, timeline_b: dict,
-) -> list[AggregateMetric]:
-    """Compute the head-to-head metrics that go into the verdict prompt
-    AND show up in the results-page JSON.
+# ─── Step 2: absolute aggregate metrics ──────────────────────────────────────
 
-    Mirrors the table in DESIGN.md §4.5 step 3.
+def _compute_aggregate_metrics(timeline: dict) -> list[AggregateMetric]:
+    """Eight absolute metrics scored against this demo's own timeline.
+
+    Mirrors the table in DESIGN.md §4.5 step 3 but reframed for single-video:
+    every metric is a self-contained ``(name, value, interpretation)``,
+    no A vs B comparison.
+
+    Roughly:
+      mean_appeal_index        — z-scored, near 0 means neutral arc
+      mean_cognitive_load      — z-scored, positive = sustained load
+      pct_reward_dominance     — % of TRs where reward_anticipation was the
+                                 dominant ROI
+      pct_friction_dominance   — % of TRs where friction_anxiety dominated
+      friction_spike_count     — count of TRs with a friction spike
+      motor_readiness_peak     — max raw motor_readiness over the demo
+      flow_state_windows       — count of sliding windows hitting flow
+      bounce_risk_windows      — count of sliding windows hitting bounce-risk
     """
-    out: list[AggregateMetric] = []
-
     def _series(timeline: dict, key: str) -> list[float]:
         return [f.get("composites", {}).get(key, 0.0) for f in timeline.get("frames", [])]
 
@@ -185,153 +198,155 @@ def _compute_aggregate_metrics(
     def _mean(xs: Sequence[float]) -> float:
         return sum(xs) / len(xs) if xs else 0.0
 
-    def _emit(name: str, a: float, b: float, *, higher_is_better: bool = True,
-              edge_description: str | None = None) -> None:
-        if abs(a - b) < 1e-3:
-            edge: str = "tie"
-        elif higher_is_better:
-            edge = "A" if a > b else "B"
-        else:
-            edge = "A" if a < b else "B"
-        out.append(AggregateMetric(
-            name=name, a=round(a, 4), b=round(b, 4),
-            edge=edge,
-            edge_description=edge_description or ("higher is better" if higher_is_better else None),
-        ))
-
-    a_appeal = _series(timeline_a, "appeal_index")
-    b_appeal = _series(timeline_b, "appeal_index")
-    _emit("mean_appeal_index", _mean(a_appeal), _mean(b_appeal))
-
-    a_load = _roi(timeline_a, "cognitive_load")
-    b_load = _roi(timeline_b, "cognitive_load")
-    _emit("mean_cognitive_load", _mean(a_load), _mean(b_load),
-          higher_is_better=False, edge_description="lower is better")
-
     def _pct_dominance(timeline: dict, roi: str) -> float:
         n = len(timeline.get("frames", []))
         if n == 0:
             return 0.0
-        return 100.0 * sum(1 for f in timeline["frames"]
-                           if f.get("dominant") == roi) / n
-
-    _emit("pct_reward_dominance",
-          _pct_dominance(timeline_a, "reward_anticipation"),
-          _pct_dominance(timeline_b, "reward_anticipation"))
-
-    _emit("pct_friction_dominance",
-          _pct_dominance(timeline_a, "friction_anxiety"),
-          _pct_dominance(timeline_b, "friction_anxiety"),
-          higher_is_better=False, edge_description="lower is better")
+        return 100.0 * sum(
+            1 for f in timeline["frames"] if f.get("dominant") == roi
+        ) / n
 
     def _spike_count(timeline: dict, roi: str) -> int:
-        return sum(1 for f in timeline.get("frames", [])
-                   if f.get("spikes", {}).get(roi))
-
-    _emit("friction_spike_count",
-          float(_spike_count(timeline_a, "friction_anxiety")),
-          float(_spike_count(timeline_b, "friction_anxiety")),
-          higher_is_better=False, edge_description="fewer is better")
-
-    a_motor = _roi(timeline_a, "motor_readiness")
-    b_motor = _roi(timeline_b, "motor_readiness")
-    _emit("motor_readiness_peak",
-          max(a_motor) if a_motor else 0.0,
-          max(b_motor) if b_motor else 0.0)
+        return sum(
+            1 for f in timeline.get("frames", [])
+            if f.get("spikes", {}).get(roi)
+        )
 
     def _window_count(timeline: dict, key: str) -> int:
-        return sum(1 for w in timeline.get("windows", [])
-                   if w.get("composites", {}).get(key))
+        return sum(
+            1 for w in timeline.get("windows", [])
+            if w.get("composites", {}).get(key)
+        )
 
-    _emit("flow_state_windows",
-          float(_window_count(timeline_a, "flow_state")),
-          float(_window_count(timeline_b, "flow_state")))
+    appeal = _mean(_series(timeline, "appeal_index"))
+    load = _mean(_roi(timeline, "cognitive_load"))
+    reward_pct = _pct_dominance(timeline, "reward_anticipation")
+    friction_pct = _pct_dominance(timeline, "friction_anxiety")
+    friction_spikes = _spike_count(timeline, "friction_anxiety")
+    motor = _roi(timeline, "motor_readiness")
+    motor_peak = max(motor) if motor else 0.0
+    flow_windows = _window_count(timeline, "flow_state")
+    bounce_windows = _window_count(timeline, "bounce_risk")
 
-    _emit("bounce_risk_windows",
-          float(_window_count(timeline_a, "bounce_risk")),
-          float(_window_count(timeline_b, "bounce_risk")),
-          higher_is_better=False, edge_description="fewer is better")
+    def _appeal_phrase(v: float) -> str:
+        if v > 0.15:
+            return "appeal arc skewed positive"
+        if v < -0.15:
+            return "appeal arc skewed negative"
+        return "appeal arc broadly neutral"
 
-    return out
+    def _load_phrase(v: float) -> str:
+        if v > 0.15:
+            return "sustained cognitive load above baseline"
+        if v < -0.15:
+            return "easy reading — load below baseline"
+        return "load near baseline"
+
+    return [
+        AggregateMetric(
+            name="mean_appeal_index", value=round(appeal, 4),
+            interpretation=_appeal_phrase(appeal),
+        ),
+        AggregateMetric(
+            name="mean_cognitive_load", value=round(load, 4),
+            interpretation=_load_phrase(load),
+        ),
+        AggregateMetric(
+            name="pct_reward_dominance", value=round(reward_pct, 2),
+            interpretation=f"{reward_pct:.0f}% of the demo had reward dominant",
+        ),
+        AggregateMetric(
+            name="pct_friction_dominance", value=round(friction_pct, 2),
+            interpretation=f"{friction_pct:.0f}% of the demo had friction dominant",
+        ),
+        AggregateMetric(
+            name="friction_spike_count", value=float(friction_spikes),
+            interpretation=f"{friction_spikes} friction spike(s) detected",
+        ),
+        AggregateMetric(
+            name="motor_readiness_peak", value=round(motor_peak, 4),
+            interpretation="peak click-readiness over the demo",
+        ),
+        AggregateMetric(
+            name="flow_state_windows", value=float(flow_windows),
+            interpretation=f"{flow_windows} flow-state window(s)",
+        ),
+        AggregateMetric(
+            name="bounce_risk_windows", value=float(bounce_windows),
+            interpretation=f"{bounce_windows} bounce-risk window(s)",
+        ),
+    ]
 
 
-async def _generate_verdict(
+# ─── Step 3: overall assessment ──────────────────────────────────────────────
+
+async def _generate_overall_assessment(
     metrics: list[AggregateMetric],
-    insights_a: list[Insight],
-    insights_b: list[Insight],
+    insights: list[Insight],
     *,
     goal: str | None,
     cfg: AppConfig,
     run_id: str,
-) -> Verdict:
+) -> OverallAssessment:
     metrics_block = json.dumps([m.model_dump() for m in metrics], indent=2)
-    insights_a_json = json.dumps([i.model_dump() for i in insights_a], indent=2)
-    insights_b_json = json.dumps([i.model_dump() for i in insights_b], indent=2)
-    prompt = VERDICT_PROMPT_TEMPLATE.format(
+    insights_json = json.dumps([i.model_dump() for i in insights], indent=2)
+    prompt = ASSESSMENT_PROMPT_TEMPLATE.format(
         goal=goal or "general first-impression evaluation",
         metrics_table_json=metrics_block,
-        insights_a_json=insights_a_json,
-        insights_b_json=insights_b_json,
+        insights_json=insights_json,
     )
     raw = await _call_gemini(
         prompt, cfg=cfg, model_name=cfg.gemini_model_verdict,
-        run_id=run_id, step="gemini.verdict",
+        run_id=run_id, step="gemini.assessment",
     )
     try:
-        return Verdict(**raw)
+        return OverallAssessment(**raw)
     except Exception as e:
         raise SynthesizerError(
-            f"Gemini verdict returned an unparseable Verdict object: {e}"
+            f"Gemini assessment returned an unparseable OverallAssessment: {e}"
         ) from e
 
 
+# ─── Top-level entry point ───────────────────────────────────────────────────
+
 async def synthesize(
-    events_a: list[Event],
-    events_b: list[Event],
-    timeline_a: dict,
-    timeline_b: dict,
+    events: list[Event],
+    timeline: dict,
     *,
     goal: str | None,
     cfg: AppConfig,
     run_id: str,
 ) -> SynthesisResult:
-    """Run the full synthesizer: per-video insights, then the verdict."""
-    import time
-
+    """Run the full synthesizer: per-event insights, then overall assessment."""
     log.info(
         "synthesize begin",
-        extra={"step": "synth", "run_id": run_id,
-               "n_events_a": len(events_a), "n_events_b": len(events_b)},
+        extra={"step": "synth", "run_id": run_id, "n_events": len(events)},
     )
 
     t0 = time.perf_counter()
-    insights_a = await _generate_insights(
-        events_a, version="A", goal=goal, cfg=cfg, run_id=run_id,
-    )
-    insights_b = await _generate_insights(
-        events_b, version="B", goal=goal, cfg=cfg, run_id=run_id,
+    insights = await _generate_insights(
+        events, goal=goal, cfg=cfg, run_id=run_id,
     )
     insights_ms = (time.perf_counter() - t0) * 1000.0
 
-    metrics = _compute_aggregate_metrics(timeline_a, timeline_b)
+    metrics = _compute_aggregate_metrics(timeline)
 
     t1 = time.perf_counter()
-    verdict = await _generate_verdict(
-        metrics, insights_a, insights_b, goal=goal, cfg=cfg, run_id=run_id,
+    overall = await _generate_overall_assessment(
+        metrics, insights, goal=goal, cfg=cfg, run_id=run_id,
     )
-    verdict_ms = (time.perf_counter() - t1) * 1000.0
+    assessment_ms = (time.perf_counter() - t1) * 1000.0
 
     log.info(
         "synthesize done",
         extra={"step": "synth", "run_id": run_id,
-               "n_insights_a": len(insights_a), "n_insights_b": len(insights_b),
-               "winner": verdict.winner, "elapsed_ms": round(insights_ms + verdict_ms, 2)},
+               "n_insights": len(insights),
+               "elapsed_ms": round(insights_ms + assessment_ms, 2)},
     )
     return SynthesisResult(
-        insights_a=insights_a,
-        insights_b=insights_b,
+        insights=insights,
         aggregate_metrics=metrics,
-        verdict=verdict,
-        insights_calls_ms=round(insights_ms, 2),
-        verdict_call_ms=round(verdict_ms, 2),
+        overall_assessment=overall,
+        insights_call_ms=round(insights_ms, 2),
+        assessment_call_ms=round(assessment_ms, 2),
     )

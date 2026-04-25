@@ -1,8 +1,13 @@
 """Assemble the final results-page JSON.
 
-The frontend's /results view (DESIGN.md §4.6 view 3) reads exactly this
-shape. Keeping the contract pinned in one place makes the frontend's job
-easier and gives us a single place to update when the schema evolves.
+The frontend's ``/results`` view (DESIGN.md §4.6 view 3, post-pivot §17)
+reads exactly this shape. Keeping the contract pinned in one place makes
+the frontend's job easier and gives us a single place to update when the
+schema evolves.
+
+Pre-pivot this returned a dual-subject ``AnalyzeResponse`` (``a`` +
+``b`` + verdict). The pivot collapsed it to single-subject — see DESIGN.md
+§17.
 """
 
 from __future__ import annotations
@@ -16,9 +21,8 @@ from .schemas import (
     AnalyzeResponse,
     Event,
     Insight,
+    OverallAssessment,
     TimelineSummary,
-    Verdict,
-    VersionResult,
 )
 
 log = logging.getLogger(__name__)
@@ -27,13 +31,13 @@ log = logging.getLogger(__name__)
 def _summarize_timeline(timeline: dict) -> TimelineSummary:
     """Strip the heavy fields from a TRIBE response for the wire.
 
-    The full timeline includes per-TR `values`, `deltas`, `spikes`,
-    `co_movement`, `local_peak` and `composites` dicts. The frontend's
+    The full timeline includes per-TR ``values``, ``deltas``, ``spikes``,
+    ``co_movement``, ``local_peak`` and ``composites`` dicts. The frontend's
     chart only needs:
-        - n_trs / tr_duration_s for the X axis
-        - roi_series for the 8-curve line chart
-        - composites_series for overlay rows (appeal_index etc.)
-        - windows for window-level annotations (flow_state highlights)
+        - ``n_trs`` / ``tr_duration_s`` for the X axis
+        - ``roi_series`` for the 8-curve line chart
+        - ``composites_series`` for overlay rows (appeal_index etc.)
+        - ``windows`` for window-level annotations (flow_state highlights)
     The per-TR raw frames stay server-side; we don't need them browser-side.
     """
     composites_keys = {
@@ -61,19 +65,14 @@ def build_response(
     *,
     run_id: str,
     goal: str | None,
-    timeline_a: dict,
-    timeline_b: dict,
-    duration_a: float,
-    duration_b: float,
-    events_a: list[Event],
-    events_b: list[Event],
-    insights_a: list[Insight],
-    insights_b: list[Insight],
+    timeline: dict,
+    duration_s: float,
+    events: list[Event],
+    insights: list[Insight],
     aggregate_metrics: list[AggregateMetric],
-    verdict: Verdict,
+    overall_assessment: OverallAssessment,
     elapsed_ms: float,
-    video_url_a: str | None = None,
-    video_url_b: str | None = None,
+    video_url: str | None = None,
 ) -> AnalyzeResponse:
     """Assemble the final JSON. Total per-call work is small — this just
     wraps already-computed pieces into the response model."""
@@ -82,29 +81,18 @@ def build_response(
     log.debug(
         "building response",
         extra={"run_id": run_id, "step": "output",
-               "n_insights_a": len(insights_a), "n_insights_b": len(insights_b)},
+               "n_events": len(events), "n_insights": len(insights),
+               "n_metrics": len(aggregate_metrics)},
     )
 
-    a = VersionResult(
-        version="A",
-        video_url=video_url_a,
-        duration_s=duration_a,
-        timeline=_summarize_timeline(timeline_a),
-        events=events_a,
-        insights=insights_a,
-    )
-    b = VersionResult(
-        version="B",
-        video_url=video_url_b,
-        duration_s=duration_b,
-        timeline=_summarize_timeline(timeline_b),
-        events=events_b,
-        insights=insights_b,
-    )
     return AnalyzeResponse(
         meta=AnalyzeRequestMeta(goal=goal, run_id=run_id, received_at=received_at),
-        a=a, b=b,
+        video_url=video_url,
+        duration_s=duration_s,
+        timeline=_summarize_timeline(timeline),
+        events=events,
+        insights=insights,
         aggregate_metrics=aggregate_metrics,
-        verdict=verdict,
+        overall_assessment=overall_assessment,
         elapsed_ms=round(elapsed_ms, 2),
     )
