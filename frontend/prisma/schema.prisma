@@ -54,16 +54,24 @@ model RunVersion {
 }
 
 model RunSummary {
-  id          String   @id @default(cuid())
-  runId       String   @unique
-  run         Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
-  winner      String
-  summaryText String
-  avgRoiA     Json
-  avgRoiB     Json
+  id                String   @id @default(cuid())
+  runId             String   @unique
+  run               Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  winner            String
+  summaryText       String
+  avgRoiA           Json
+  avgRoiB           Json
+  backboardThreadId String?  // Persistent Backboard thread for this run's agent conversations
   // pgvector-ready: add `roiEmbedding Unsupported("vector(16)")?` here in v2
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+// Key/value store for app-wide config (e.g. shared Backboard assistant ID)
+model AppConfig {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
 }
 
 model RunInsight {

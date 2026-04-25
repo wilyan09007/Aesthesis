@@ -10,6 +10,7 @@ import AnalyzingView from "@/components/AnalyzingView"
 import ResultsView from "@/components/ResultsView"
 import HistoryPanel from "@/components/HistoryPanel"
 import ComparePanel from "@/components/ComparePanel"
+import AgentPanel from "@/components/AgentPanel"
 import { analyze, AnalyzeError, API_BASE_URL } from "@/lib/api"
 import { adaptForResultsView, type ResultsViewData } from "@/lib/adapt"
 import type { AppState, CaptureInputs } from "@/lib/types"
@@ -37,6 +38,7 @@ export default function Home() {
   const [savedRunId, setSavedRunId] = useState<string | null>(null)
   const [compareRunId, setCompareRunId] = useState<string | null>(null)
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle")
+  const [agentOpen, setAgentOpen] = useState(false)
 
   const requireAuth = useCallback((action: () => void) => {
     if (!user) {
@@ -192,6 +194,13 @@ export default function Home() {
               saveStatus={saveStatus}
               onSave={user ? handleSave : undefined}
               onHistoryOpen={user ? () => setHistoryOpen(true) : undefined}
+              onAgentOpen={user ? () => {
+                // Auto-save so the agent has a runId to compare against.
+                // Opens the panel immediately; by the time the user types,
+                // the save is complete and currentRunIdRef picks up the new id.
+                if (!savedRunId) handleSave().catch(console.error)
+                setAgentOpen(true)
+              } : undefined}
             />
           </motion.div>
         )}
@@ -212,6 +221,15 @@ export default function Home() {
           onClose={() => setCompareRunId(null)}
         />
       )}
+
+      <AnimatePresence>
+        {agentOpen && (
+          <AgentPanel
+            currentRunId={savedRunId}
+            onClose={() => setAgentOpen(false)}
+          />
+        )}
+      </AnimatePresence>
     </main>
   )
 }

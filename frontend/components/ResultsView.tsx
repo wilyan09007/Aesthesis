@@ -20,6 +20,7 @@ interface ResultsViewProps {
   saveStatus?: "idle" | "saving" | "saved" | "error"
   onSave?: () => Promise<string>
   onHistoryOpen?: () => void
+  onAgentOpen?: () => void
 }
 
 function getCurrentROI(frames: Frame[], currentTime: number): ROIValues | undefined {
@@ -33,7 +34,7 @@ function getCurrentROI(frames: Frame[], currentTime: number): ROIValues | undefi
   return closest.values
 }
 
-export default function ResultsView({ data, videoFile, onReset, savedRunId, saveStatus = "idle", onSave, onHistoryOpen }: ResultsViewProps) {
+export default function ResultsView({ data, videoFile, onReset, savedRunId, saveStatus = "idle", onSave, onHistoryOpen, onAgentOpen }: ResultsViewProps) {
   const [currentTime, setCurrentTime] = useState(0)
   const currentROI = useMemo(() => getCurrentROI(data.frames, currentTime), [data.frames, currentTime])
 
@@ -58,6 +59,26 @@ export default function ResultsView({ data, videoFile, onReset, savedRunId, save
         </div>
 
         <div className="flex items-center gap-2">
+          {onAgentOpen && (
+            <button
+              onClick={onAgentOpen}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all"
+              style={{
+                background: "rgba(124,156,255,0.1)",
+                border: "1px solid rgba(124,156,255,0.25)",
+                color: "#7C9CFF",
+              }}
+              onMouseEnter={e => (e.currentTarget.style.boxShadow = "0 0 16px rgba(124,156,255,0.15)")}
+              onMouseLeave={e => (e.currentTarget.style.boxShadow = "none")}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <path d="M12 2a2 2 0 012 2v2a2 2 0 01-2 2 2 2 0 01-2-2V4a2 2 0 012-2z" />
+                <path d="M12 8v4M8.5 14.5l-2 2M15.5 14.5l2 2M12 16v2M8 20h8" />
+              </svg>
+              Ask AI
+            </button>
+          )}
+
           {onHistoryOpen && (
             <button
               onClick={onHistoryOpen}
