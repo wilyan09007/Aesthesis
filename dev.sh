@@ -16,7 +16,8 @@
 # whenever you change tribe_service/:
 #   modal deploy tribe_service/modal_app.py
 #
-# Usage:  ./dev.sh
+# Usage:  ./dev.sh                       (Git Bash / WSL / Linux / macOS)
+#         dev.cmd  or  .\dev.cmd         (Windows cmd.exe / PowerShell — wrapper)
 # Stop:   Ctrl-C (trap kills the local processes + their child trees)
 
 set -eu
@@ -24,8 +25,14 @@ set -eu
 cd "$(dirname "$0")"
 
 # ── Load .env ───────────────────────────────────────────────────────────────
+# Strip carriage returns first. .env on Windows is usually CRLF, and bash's
+# `source` attaches a literal \r to every value — so `TRIBE_SERVICE_URL`
+# becomes `https://...modal.run\r` and curl/the backend silently 404 on
+# every request. Process-substitute through `tr -d '\r'` to neutralise it.
 if [[ -f .env ]]; then
-    set -a; source .env; set +a
+    set -a
+    source <(tr -d '\r' < .env)
+    set +a
     echo "[dev] .env loaded"
 else
     echo "[dev] WARNING: no .env at repo root; backend will use defaults" >&2
