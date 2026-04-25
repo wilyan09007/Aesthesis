@@ -1,0 +1,24 @@
+[project]
+name = "aesthesis-app"
+version = "0.1.0.0"
+description = "Aesthesis backend orchestrator — /api/analyze takes two MP4s, returns the full results-page JSON."
+requires-python = ">=3.10"
+
+dependencies = [
+    "fastapi>=0.110",
+    "pydantic>=2.5",
+    "httpx>=0.27",
+    "numpy>=1.26",
+    "python-multipart>=0.0.9",
+    # Optional — orchestrator works in mock mode without these:
+    # "ffmpeg-python>=0.2",
+    # "google-generativeai>=0.7",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["aesthesis*"]
