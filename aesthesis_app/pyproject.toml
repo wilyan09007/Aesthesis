@@ -25,9 +25,9 @@ dependencies = [
     # (D26). Critical when BrowserUse hangs and we have to take down a
     # tree of grandchildren (Playwright driver -> Chromium).
     "psutil>=5.9",
-    # ChatGoogleGenerativeAI for BrowserUse — lets the agent reuse the
-    # existing GEMINI_API_KEY rather than asking the dev for an OpenAI key.
-    "langchain-google-genai>=4.0",
+    # NOTE: we do NOT use langchain. browser-use 0.12 ships its own
+    # ChatGoogle wrapper (browser_use/llm/google/chat.py) that wraps
+    # Google's official `genai` client directly — no langchain needed.
     # ffmpeg binary fallback. We prefer system ffmpeg (already required
     # by ffmpeg-python for screenshot extraction) but if it isn't on
     # PATH the bundled binary keeps the capture path working without

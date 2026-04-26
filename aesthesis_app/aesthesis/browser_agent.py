@@ -312,17 +312,19 @@ def _build_task_prompt(url: str, goal: str | None, max_seconds: float) -> str:
     )
 
 
-def _build_llm(model_name: str, *, run_id: str):  # noqa: ANN202 — type depends on installed langchain
-    """Construct ChatGoogleGenerativeAI for BrowserUse.
+def _build_llm(model_name: str, *, run_id: str):  # noqa: ANN202 — type from browser_use lazy-import
+    """Construct browser-use's native ``ChatGoogle`` LLM wrapper.
 
-    GitHub issue browser-use/browser-use#1672 documents
-    DefaultCredentialsError when the Google ADC path is used implicitly.
-    Workaround: pass ``google_api_key=SecretStr(...)`` explicitly. We
-    pull from ``GEMINI_API_KEY`` (project convention) and fall back to
-    ``GOOGLE_API_KEY`` for symmetry with langchain's default.
+    browser-use 0.12.x ships its own LLM abstractions (``ChatGoogle``,
+    ``ChatOpenAI``, ``ChatAnthropic``, ``ChatBrowserUse``, ...) — we do
+    NOT use langchain. ``ChatGoogle`` wraps Google's official ``genai``
+    client directly and accepts ``api_key`` as a plain string.
+
+    We pull the key from ``GEMINI_API_KEY`` first (Aesthesis project
+    convention, used by the synthesizer too), then fall back to
+    ``GOOGLE_API_KEY`` (genai's default lookup name).
     """
-    from langchain_google_genai import ChatGoogleGenerativeAI  # type: ignore
-    from pydantic import SecretStr
+    from browser_use import ChatGoogle  # type: ignore
 
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not api_key:
@@ -337,9 +339,9 @@ def _build_llm(model_name: str, *, run_id: str):  # noqa: ANN202 — type depend
         extra={"step": "llm", "run_id": run_id, "model": model_name,
                "key_source": "GEMINI_API_KEY" if os.environ.get("GEMINI_API_KEY") else "GOOGLE_API_KEY"},
     )
-    return ChatGoogleGenerativeAI(
+    return ChatGoogle(
         model=model_name,
-        google_api_key=SecretStr(api_key),
+        api_key=api_key,
         temperature=0.0,  # determinism beats creativity for an action-picker
     )
 
@@ -349,59 +351,79 @@ def _build_llm(model_name: str, *, run_id: str):  # noqa: ANN202 — type depend
 
 def _serialise_action_history(agent: Any, *, run_id: str) -> list[dict]:
     """Pull a JSON-friendly list of (timestamp, description) actions from
-    the BrowserUse Agent's history.
+    ``agent.history``.
 
-    BrowserUse 0.12 stores history under various attribute names across
-    point releases (``history``, ``state.history``, etc.). We probe
-    defensively and log what we find. If the structure is unrecognised,
-    we return an empty list and log a warning — the orchestrator falls
-    back to None (no action stamping) per D15's optional-input contract.
+    Per browser_use/agent/service.py:435, ``Agent.__init__`` always sets
+    ``self.history = AgentHistoryList(history=[], usage=None)``. The
+    inner ``.history`` attribute is the list of per-step ``AgentHistory``
+    items (defined in browser_use/agent/views.py). We prefer
+    ``agent_steps()`` when it exists (curated per-step view), then fall
+    back to walking ``history.history`` directly. Each step is dumped via
+    Pydantic ``model_dump()`` when available, then ``str()`` as a final
+    fallback.
 
-    ASSUMPTION (ASSUMPTIONS.md A6): the BrowserUse history shape is not
-    versioned in their docs. The first time a real run produces an
-    unexpected shape, log will surface it and we can pin the exact
-    extraction.
+    Per-step wall-clock timestamps aren't always exposed by browser-use,
+    so we use the step index as a deterministic ordering key. The
+    orchestrator's ±0.5s window in ``_nearest_action`` matches each step
+    against brain-event TR timestamps; with browser-use steps coming in
+    roughly real-time, index-as-second is a usable approximation for the
+    short captures we run (~30s).
     """
-    candidates = []
-    for attr_chain in ("history", "state.history", "agent_history"):
-        obj: Any = agent
-        try:
-            for part in attr_chain.split("."):
-                obj = getattr(obj, part)
-            if obj:
-                candidates.append((attr_chain, obj))
-                break
-        except AttributeError:
-            continue
-
-    if not candidates:
+    history_list = getattr(agent, "history", None)
+    if history_list is None:
         log.warning(
             "agent.history_not_found",
-            extra={"step": "agent", "run_id": run_id, "agent_attrs": [a for a in dir(agent) if not a.startswith("_")][:25]},
+            extra={"step": "agent", "run_id": run_id,
+                   "agent_attrs": [a for a in dir(agent) if not a.startswith("_")][:25]},
         )
         return []
 
-    attr_used, history = candidates[0]
+    # Prefer agent_steps() — the curated per-step view from AgentHistoryList
+    steps = None
+    if hasattr(history_list, "agent_steps") and callable(history_list.agent_steps):
+        try:
+            steps = history_list.agent_steps()
+        except Exception as e:  # noqa: BLE001 — defensive against API drift
+            log.debug("agent.history.agent_steps_failed: %s", e,
+                      extra={"step": "agent", "run_id": run_id})
+            steps = None
+
+    # Fall back to the raw .history list
+    if steps is None:
+        steps = getattr(history_list, "history", None)
+
+    if not steps:
+        log.info(
+            "agent.history_empty",
+            extra={"step": "agent", "run_id": run_id,
+                   "history_type": type(history_list).__name__},
+        )
+        return []
+
     log.info(
         "agent.history_extracted",
-        extra={"step": "agent", "run_id": run_id, "attr": attr_used,
-               "n_entries": len(history) if hasattr(history, "__len__") else "unknown"},
+        extra={"step": "agent", "run_id": run_id,
+               "n_entries": len(steps),
+               "history_type": type(history_list).__name__},
     )
 
     out: list[dict] = []
-    for i, entry in enumerate(history):
-        ts = getattr(entry, "created_at", None) or getattr(entry, "timestamp", None) or i
-        # BrowserUse history entries have varied shapes — try common attrs
-        action_repr = (
-            getattr(entry, "action", None)
-            or getattr(entry, "result", None)
-            or getattr(entry, "model_output", None)
-            or repr(entry)
-        )
+    for i, step in enumerate(steps):
+        # AgentHistory items are Pydantic models with state, model_output,
+        # and result fields. Dump to dict, then surface result or
+        # model_output as the human-readable description.
+        if hasattr(step, "model_dump"):
+            try:
+                dumped = step.model_dump()
+                desc = str(dumped.get("result") or dumped.get("model_output") or dumped)
+            except Exception:  # noqa: BLE001
+                desc = str(step)
+        else:
+            desc = str(step)
         out.append({
             "i": i,
-            "timestamp_s": float(ts) if isinstance(ts, (int, float)) else 0.0,
-            "description": str(action_repr)[:500],  # cap length
+            "timestamp_s": float(i),
+            "description": desc[:500],
         })
     return out
 
@@ -433,7 +455,7 @@ async def _run_capture(args: argparse.Namespace) -> None:
 
     # Lazy imports — heavy deps stay out of `python -m aesthesis.browser_agent --help` path
     from playwright.async_api import async_playwright  # type: ignore
-    from browser_use import Agent, BrowserSession  # type: ignore
+    from browser_use import Agent, Browser  # type: ignore — Browser is the modern alias for BrowserSession
 
     streamer: AdaptiveStreamer | None = None
     pw_ctx = None
@@ -491,15 +513,23 @@ async def _run_capture(args: argparse.Namespace) -> None:
             await page.goto(args.url, wait_until="domcontentloaded", timeout=15_000)
             log.info("agent.initial_nav_done", extra={"step": "agent", "run_id": run_id})
 
-            # Build BrowserUse on top
+            # Build BrowserUse on top. Browser is the modern alias for
+            # BrowserSession (per browser_use/__init__.py:54). Connecting via
+            # cdp_url means BrowserUse attaches to the Chromium WE launched,
+            # rather than spawning its own — the only pattern that lets our
+            # CDP screencast and BrowserUse's agent loop coexist on the
+            # same tab. (See ASSUMPTIONS_PHASE2_CAPTURE.md A2.)
             llm = _build_llm(args.browseruse_model, run_id=run_id)
-            bu_session = BrowserSession(cdp_url=f"http://127.0.0.1:{cdp_port}")
+            bu_browser = Browser(cdp_url=f"http://127.0.0.1:{cdp_port}")
             log.info("agent.browseruse_session_built",
                      extra={"step": "agent", "run_id": run_id, "cdp_url": f"http://127.0.0.1:{cdp_port}"})
 
             task_prompt = _build_task_prompt(args.url, args.goal, args.max_recording_s)
             log.debug("agent.task_prompt", extra={"step": "agent", "run_id": run_id, "prompt_len": len(task_prompt)})
-            agent = Agent(task=task_prompt, llm=llm, browser_session=bu_session)
+            # Agent accepts both `browser=` (preferred modern API) and
+            # `browser_session=` (legacy alias). Verified against
+            # browser_use/agent/service.py:138-140 in 0.12.6.
+            agent = Agent(task=task_prompt, llm=llm, browser=bu_browser)
             log.info("agent.constructed", extra={"step": "agent", "run_id": run_id})
 
             # Race: agent.run() vs recording cap

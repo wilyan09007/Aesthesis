@@ -145,27 +145,34 @@ per-frame timestamp file to produce a true VFR (variable framerate) MP4.
 
 ---
 
-## A6. BrowserUse action history shape is not API-stable
+## A6. BrowserUse `agent.history` is `AgentHistoryList`, accessed via `.agent_steps()`
 
-**Source:** browser-use 0.12.x source + GitHub issues.
+**Source:** Verified by reading the installed browser-use 0.12.6 source
+on this machine — `browser_use/agent/service.py:435` shows
+``self.history = AgentHistoryList(history=[], usage=None)``.
+`AgentHistoryList` and `AgentHistory` are defined in
+`browser_use/agent/views.py` (Pydantic models, exported from the
+top-level `browser_use` package alongside `Agent`, `Browser`, etc.).
 
-**Finding:** BrowserUse exposes the agent's per-step decisions and
-results via various attribute names across point releases — `agent.history`,
-`agent.state.history`, `agent.agent_history`. The schema of each entry
-also varies (`action`, `result`, `model_output`, ...).
+**API:**
+- `agent.history` — always present, always `AgentHistoryList`
+- `agent.history.agent_steps()` — curated per-step view (preferred)
+- `agent.history.history` — raw list of `AgentHistory` items (fallback)
+- Each step is a Pydantic model with `state`, `model_output`, `result`
+  fields; dump via `.model_dump()`.
 
-**Resolution:** `browser_agent._serialise_action_history(agent)` probes
-the candidate attributes in order and returns whatever it finds. If
-none match (e.g., a future version renames everything), it logs a
-warning and returns `[]`. The orchestrator's action-stamping path
-(`_attach_per_event_context`) treats an empty action log identically
-to no log at all — events just don't get `agent_action_at_t` stamped,
-the analysis still runs, and Gemini falls back to the goal-only prompt.
+**Resolution:** `browser_agent._serialise_action_history(agent)` calls
+`agent_steps()` first, falls back to `.history`, dumps each item via
+Pydantic. Per-step wall-clock timestamps aren't always exposed by
+browser-use, so we use the step index as a deterministic ordering key.
+The orchestrator's `_nearest_action` ±0.5s window matches against
+brain-event TR timestamps; with browser-use steps coming roughly real-
+time, index-as-second is a usable approximation for ~30s captures.
 
-**Sharp edge to monitor:** the first time a new BrowserUse version
-produces an unexpected shape, the warning will surface in the
-backend log (`agent.history_not_found`, with `agent_attrs` listing the
-actual attributes available). That's the cue to update the probe order.
+**Earlier (incorrect) assumption:** my first pass at this file probed
+multiple candidate attribute names (`history`, `state.history`,
+`agent_history`) defensively because I hadn't read the source. Updated
+once I did — the API is stable and well-defined in 0.12.6.
 
 ---
 
