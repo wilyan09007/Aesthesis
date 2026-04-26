@@ -133,13 +133,30 @@ def bake_parcel_map(data_dir: Path) -> np.ndarray:
     log.info("Schaefer fetched in %.1fs (maps=%s)",
              time.perf_counter() - t0, atlas["maps"])
 
-    labels = [_decode(b) for b in atlas["labels"]]
-    log.info("Schaefer label count: %d (expected %d). Sample: %s",
-             len(labels), N_PARCELS, labels[:3])
-    if len(labels) != N_PARCELS:
+    labels_raw = [_decode(b) for b in atlas["labels"]]
+    log.info("Schaefer label count (raw): %d. Sample: %s",
+             len(labels_raw), labels_raw[:3])
+
+    # nilearn ≥ 0.13 prepends a "Background" entry at index 0 so labels are
+    # 0-aligned with the volumetric values (label[v] == name for value v,
+    # where v=0 is background). Older nilearn returned exactly N_PARCELS
+    # labels with index 0 mapping to volumetric value 1. Detect and
+    # normalize: after this block, `labels` always has length N_PARCELS
+    # and labels[i] corresponds to volumetric value (i+1).
+    if len(labels_raw) == N_PARCELS + 1:
+        if "background" not in labels_raw[0].lower():
+            log.warning(
+                "Schaefer returned %d labels but labels[0]='%s' is not "
+                "'Background'. Proceeding by dropping the first entry.",
+                len(labels_raw), labels_raw[0],
+            )
+        labels = labels_raw[1:]
+    elif len(labels_raw) == N_PARCELS:
+        labels = labels_raw
+    else:
         raise RuntimeError(
-            f"Schaefer returned {len(labels)} labels; expected {N_PARCELS}. "
-            "Atlas version mismatch?"
+            f"Schaefer returned {len(labels_raw)} labels; expected "
+            f"{N_PARCELS} or {N_PARCELS + 1}. Atlas version mismatch?"
         )
 
     # ── 2. Build hemisphere masks from label names ──────────────────────────
@@ -169,11 +186,11 @@ def bake_parcel_map(data_dir: Path) -> np.ndarray:
     t2 = time.perf_counter()
     lh_proj = surface.vol_to_surf(
         atlas["maps"], fsavg["pial_left"],
-        interpolation="nearest", radius=1.0,
+        interpolation="nearest_most_frequent", radius=1.0,
     )
     rh_proj = surface.vol_to_surf(
         atlas["maps"], fsavg["pial_right"],
-        interpolation="nearest", radius=1.0,
+        interpolation="nearest_most_frequent", radius=1.0,
     )
     log.info("projection done in %.1fs (lh=%s, rh=%s)",
              time.perf_counter() - t2, lh_proj.shape, rh_proj.shape)

@@ -24,7 +24,7 @@
 // silently render the legacy `Brain3D` placeholder so the panel never
 // shows a void. ASSUMPTIONS_BRAIN.md §3.6.
 
-import { Suspense, useEffect, useMemo, useRef } from "react"
+import { Suspense, useEffect, useMemo, useRef, useState } from "react"
 import { Canvas, useFrame } from "@react-three/fiber"
 import { OrbitControls, useGLTF } from "@react-three/drei"
 import * as THREE from "three"
@@ -60,7 +60,13 @@ interface BrainCorticalProps {
 
 interface HemisphereProps {
   url: string
-  parcelSeries: number[][]
+  /**
+   * Per-TR parcel activations. May be null when the GLB is loaded for
+   * preview / pre-analysis viewing — in that case we paint the
+   * anatomically-neutral resting state (gray-violet + sulcal shading).
+   * No mocking: zero data => zero color shift, just real anatomy.
+   */
+  parcelSeries: number[][] | null
   tIndex: number
   hemiLabel: "lh" | "rh"
 }
@@ -166,9 +172,26 @@ function HemisphereMesh({ url, parcelSeries, tIndex, hemiLabel }: HemisphereProp
     if (Array.isArray(mat)) mat.forEach(apply)
     else apply(mat)
 
+    // Initial neutral paint. If parcelSeries is null at mount time, this
+    // is the steady-state look (real anatomy, no activation signal). If
+    // parcelSeries arrives later, the useFrame loop overwrites these
+    // colors. Either way, the geometry is never black.
+    const colors = colorAttr.array as Float32Array
+    const sulc = sulcRef.current
+    const parcelIds = parcelIdRef.current!
+    for (let i = 0; i < nVertices; i++) {
+      let rgb = divergingColor(0) // z=0 → NEUTRAL
+      if (sulc) rgb = shadeBySulc(rgb, sulc[i])
+      colors[i * 3] = rgb[0]
+      colors[i * 3 + 1] = rgb[1]
+      colors[i * 3 + 2] = rgb[2]
+    }
+    colorAttr.needsUpdate = true
+
     logCortex("info", `${hemiLabel}: color attribute initialized`, {
       count: nVertices,
       dynamicUsage: true,
+      parcelIdSample: parcelIds[0],
     })
   }, [mesh, url, hemiLabel])
 
@@ -180,6 +203,8 @@ function HemisphereMesh({ url, parcelSeries, tIndex, hemiLabel }: HemisphereProp
     const colorAttr = colorAttrRef.current
     const parcelIds = parcelIdRef.current
     if (!colorAttr || !parcelIds) return
+    // No activity data — leave the neutral paint from mount in place.
+    if (!parcelSeries || parcelSeries.length === 0) return
     if (lastLoggedTRef.current === tIndex) return
 
     const tr = parcelSeries[tIndex]
@@ -227,7 +252,7 @@ function CorticalScene({
   tIndex,
   variant = "inflated",
 }: {
-  parcelSeries: number[][]
+  parcelSeries: number[][] | null
   tIndex: number
   variant: "inflated" | "pial"
 }) {
@@ -248,6 +273,8 @@ function CorticalScene({
   )
 }
 
+type GlbAvailability = "checking" | "available" | "missing"
+
 export default function BrainCortical({
   parcelSeries,
   tIndex,
@@ -255,41 +282,77 @@ export default function BrainCortical({
   variant = "inflated",
   size,
 }: BrainCorticalProps) {
-  const useFallback = parcelSeries === null || parcelSeries.length === 0
+  // Probe whether the baked GLBs exist before deciding render path.
+  // - "available" → render the real cortical mesh (colored by parcelSeries
+  //   if present, else neutral resting-state).
+  // - "missing"   → render the legacy Brain3D placeholder (icosahedron).
+  // - "checking"  → render nothing yet (very brief, ~10ms HEAD probe).
+  // We probe with HEAD requests so we don't waste bytes downloading the
+  // GLBs just to discover they 404.
+  const [glb, setGlb] = useState<GlbAvailability>("checking")
 
-  // Hooks live at the top level (rules of hooks). They run regardless of
-  // which branch we render, but their effects only matter in the path
-  // they describe.
   useEffect(() => {
-    if (useFallback) {
-      logCortex("info", "fallback: parcel_series unavailable; rendering placeholder", {
-        reason: parcelSeries === null ? "null" : "empty",
+    let cancelled = false
+    const left = variant === "inflated" ? LEFT_INFLATED : LEFT_PIAL
+    const right = variant === "inflated" ? RIGHT_INFLATED : RIGHT_PIAL
+    Promise.all([
+      fetch(left, { method: "HEAD" }).then((r) => r.ok),
+      fetch(right, { method: "HEAD" }).then((r) => r.ok),
+    ])
+      .then(([lOk, rOk]) => {
+        if (cancelled) return
+        const ok = lOk && rOk
+        setGlb(ok ? "available" : "missing")
+        logCortex("info", `GLB probe: left=${lOk ? "200" : "404"} right=${rOk ? "200" : "404"}`, {
+          variant,
+          decision: ok ? "render cortical mesh" : "fall back to placeholder",
+        })
+        if (ok) {
+          // Prime drei's GLTF cache now that we know they exist.
+          useGLTF.preload(left)
+          useGLTF.preload(right)
+        }
       })
-    } else if (parcelSeries) {
-      logCortex("info", "mounted with parcelSeries", {
+      .catch((err) => {
+        if (cancelled) return
+        setGlb("missing")
+        logCortex("error", "GLB probe failed; falling back to placeholder", err)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [variant])
+
+  useEffect(() => {
+    if (glb === "available" && parcelSeries) {
+      logCortex("info", "ready with parcelSeries", {
         n_trs: parcelSeries.length,
         n_parcels: parcelSeries[0]?.length ?? 0,
         variant,
       })
-      // Preload only when we have data to render. Avoids spurious 404s
-      // on Landing-page loads when the bake script hasn't run yet.
-      const left = variant === "inflated" ? LEFT_INFLATED : LEFT_PIAL
-      const right = variant === "inflated" ? RIGHT_INFLATED : RIGHT_PIAL
-      useGLTF.preload(left)
-      useGLTF.preload(right)
+    } else if (glb === "available" && !parcelSeries) {
+      logCortex("info", "ready without parcelSeries — rendering anatomy at resting state", {
+        variant,
+      })
     }
-  }, [useFallback, parcelSeries, variant])
+  }, [glb, parcelSeries, variant])
 
-  // ── Fallback path: no parcel data → render the placeholder ─────────────
-  // ASSUMPTIONS_BRAIN.md §3.6. The placeholder is a colored icosahedron
-  // tinted by the dominant ROI; it's visibly synthetic but never broken.
-  if (useFallback || !parcelSeries) {
+  // GLBs missing → legacy placeholder. ASSUMPTIONS_BRAIN.md §3.6.
+  if (glb === "missing") {
     return <Brain3D roiValues={roiValues} size={size} />
   }
 
   const containerStyle = size != null
     ? { width: size, height: size }
     : { width: "100%", height: "100%" }
+
+  // While probing, show a transparent canvas-shaped placeholder so the
+  // panel doesn't reflow when the real content swaps in. The Suspense
+  // fallback inside Canvas handles the brief window between probe and
+  // GLB hydration.
+  if (glb === "checking") {
+    return <div style={containerStyle} />
+  }
 
   return (
     <div style={containerStyle}>
