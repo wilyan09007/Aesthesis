@@ -127,45 +127,50 @@ def _load_face_indices_cached() -> tuple[np.ndarray, np.ndarray]:
     return lh_faces, rh_faces
 
 
-# ─── White-shell + neon-red single-tail colormap (current) ─────────────────
+# ─── White-shell + neon-red single-tail colormap (v4) ──────────────────────
 #
-# Three design goals (per user direction, ASSUMPTIONS_BRAIN.md §9.5):
+# v4 design goals (ASSUMPTIONS_BRAIN.md §9.6):
 #
-#   (A) HIGH SENSITIVITY — even small activations (|z| ≥ 0.2) produce
-#       visible color, ramping fast to saturation by |z| ≈ 1.5.
+#   (A) HIGH SENSITIVITY — small activations (z ≥ 0.2) clear the floor;
+#       saturation reached by z = 1.5.
 #
-#   (B) NO BLUE — negative z-scores (suppression) render the same
-#       white as the resting state. The colormap is single-tail: only
-#       above-baseline activations get color. This matches the user's
-#       reading of "low activity = white".
+#   (B) NO BLUE — negative z (suppression) renders identical to the
+#       resting state: warm-white shell at base alpha, no second hue.
+#       Suppression ≡ resting, visually. Aligns with "low activity = white".
 #
-#   (C) NEON ACTIVATIONS, MORE OPAQUE — saturated red ([1.0, 0.08,
-#       0.28]) at peak, base alpha 0.22 (up from 0.10) so the brain
-#       shell reads clearly even at rest.
+#   (C) ALPHA SINGLE-TAIL — alpha tracks ONLY positive z (changed from
+#       v3's |z|). Strong suppression no longer renders as a more-opaque
+#       white slab; it stays at base alpha so the fresnel rim and depth
+#       cues from the front/back split read cleanly.
 #
-# Wire format: uint8_rgba_bin, shape (n_TRs, 20480, 4). The shader
-# writes the texture's RGBA straight into diffuseColor on a transparent
-# MeshStandardMaterial (depthWrite=false).
+#   (D) HDR-FRIENDLY NEON RED — saturated, slight magenta lean. The
+#       frontend shader uses red dominance (1 - g) as the activation
+#       signal that drives an HDR emissive boost; the bloom pass picks
+#       up active faces and halos them.
+#
+# Wire format: uint8_rgba_bin, shape (n_TRs, 20480, 4). The shader writes
+# RGBA into diffuseColor and derives activation strength from the green
+# channel, so no additional wire-format change was needed for v4.
 
-# Resting-state base. Warm-ish white so it doesn't read as cold
-# fluorescent — has a slight cream tone that flatters the directional
-# lights without competing with the red highlight color.
+# Resting-state base. Warm cream so the cortex shell reads as material,
+# not as cold fluorescent paint.
 _WHITE_BASE = np.array([0.99, 0.97, 0.93], dtype=np.float32)
 
-# Peak-activation color. Vivid neon red with a faint magenta lean —
-# closer to a CSS "neon red" / "razzle-dazzle" than a muted brick red.
-# The slight blue component (0.28) keeps it from looking flat at full
-# saturation against the warm-white base.
-_NEON_RED = np.array([1.0, 0.08, 0.28], dtype=np.float32)
+# Peak-activation color. Vivid neon red, slight magenta lean to keep it
+# from looking flat against the warm-white base. Saturation pushed
+# slightly past v3 ([1.0, 0.08, 0.28] → [1.0, 0.05, 0.24]) — a lower
+# green value drives a stronger activation signal in the shader, so the
+# bloom kicks in earlier on edge-of-active faces.
+_NEON_RED = np.array([1.0, 0.05, 0.24], dtype=np.float32)
 
-# Sensitivity tuning — unchanged from v2 of the colormap.
+# Sensitivity tuning — unchanged from v2/v3.
 _Z_THRESH = 0.2
 _Z_MAX = 1.5
 
-# Alpha curve. Bumped from v2 (0.10 → 0.22 base, 0.92 → 0.95 peak) so
-# the brain reads more solidly. Still transparent enough that overlapping
-# faces don't pile into a flat slab.
-_BASE_ALPHA = 0.22  # resting shell ≈ 78% transparent
+# Alpha curve. Base trimmed from v3 (0.22 → 0.18) so the cortex reads as
+# glass at rest rather than as a thin shell of paint — fresnel rim and
+# back-mesh depth cues become legible. Peak unchanged.
+_BASE_ALPHA = 0.18  # resting shell ≈ 82% transparent
 _MAX_ALPHA = 0.95   # peak activations ≈ 95% opaque
 
 
@@ -173,32 +178,32 @@ def _diverging_color_batch(z: np.ndarray) -> np.ndarray:
     """Vectorized z-score → RGBA, single-tail white→neon-red colormap.
 
     Behaviour:
-      z ≤ 0          → pure WHITE_BASE (suppression reads as resting)
-      0 < z < THRESH → still WHITE_BASE (below sensitivity floor)
-      THRESH ≤ z ≤ Z_MAX → blend WHITE_BASE → NEON_RED, alpha grows
-      z ≥ Z_MAX      → saturated NEON_RED, alpha = MAX_ALPHA
+      z ≤ 0          → WHITE_BASE at BASE_ALPHA (suppression ≡ resting)
+      0 < z < THRESH → WHITE_BASE at BASE_ALPHA
+      THRESH ≤ z ≤ Z_MAX → blend WHITE_BASE → NEON_RED, alpha ramps
+      z ≥ Z_MAX      → saturated NEON_RED at MAX_ALPHA
 
-    Alpha additionally grows with |z| (so strongly-suppressed regions
-    show a more opaque white, not invisible). The COLOR however only
-    shifts on the positive side — there's no blue.
+    Both color and alpha are single-tail (positive z only). Negative z
+    is clamped before driving either channel, so suppression renders
+    identical to resting state.
 
     Returns shape ``(..., 4)`` float32 in [0, 1].
     """
     z = np.where(np.isfinite(z), z, 0.0).astype(np.float32, copy=False)
-    abs_z = np.abs(z)
+    pos_z = np.clip(z, 0.0, None)
 
-    # Single-tail color blend: only positive z drives the color shift.
-    # Negative z and zero stay at WHITE_BASE — no cool/blue tint.
-    pos_t = np.clip(z / _Z_MAX, 0.0, 1.0)[..., None]
+    # Color blend: only positive z drives the warm shift.
+    pos_t = np.clip(pos_z / _Z_MAX, 0.0, 1.0)[..., None]
     rgb = _WHITE_BASE + (_NEON_RED - _WHITE_BASE) * pos_t
 
-    # Alpha responds to |z| (both signs). Negative-strong regions show
-    # a slightly more opaque white; positive-strong regions show
-    # neon red at high alpha.
+    # Alpha tracks positive z only (single-tail). A mild ease-out on the
+    # ramp (a^0.75) gives mid-active faces a faster climb out of the
+    # resting shell, so the eye picks them up before they go fully neon.
     span = max(1e-6, _Z_MAX - _Z_THRESH)
-    a_ramp = np.clip((abs_z - _Z_THRESH) / span, 0.0, 1.0)
+    a_ramp = np.clip((pos_z - _Z_THRESH) / span, 0.0, 1.0)
+    a_ramp = np.power(a_ramp, 0.75, dtype=np.float32)
     alpha = _BASE_ALPHA + a_ramp * (_MAX_ALPHA - _BASE_ALPHA)
-    alpha = np.where(abs_z < _Z_THRESH, _BASE_ALPHA, alpha)
+    alpha = np.where(pos_z < _Z_THRESH, _BASE_ALPHA, alpha)
 
     return np.concatenate(
         [rgb, alpha[..., None]], axis=-1,

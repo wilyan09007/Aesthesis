@@ -23,6 +23,18 @@ set -eu
 
 cd "$(dirname "$0")"
 
+# ── Stop anything already on :3000 / :8000 ─────────────────────────────────
+# Free the dev ports before launching so a stale uvicorn / next dev from a
+# previous run doesn't block startup. netstat -ano lists LISTENING sockets
+# with their PID in column 5; loop in case IPv4 and IPv6 entries differ.
+for port in 3000 8000; do
+    pids=$(netstat -ano 2>/dev/null | grep "LISTENING" | grep -E ":${port}[[:space:]]+" | awk '{print $5}' | sort -u || true)
+    for pid in ${pids:-}; do
+        echo "[dev] stopping PID $pid on :$port"
+        taskkill.exe //F //T //PID "$pid" >/dev/null 2>&1 || true
+    done
+done
+
 # ── Load .env ───────────────────────────────────────────────────────────────
 if [[ -f .env ]]; then
     set -a; source .env; set +a

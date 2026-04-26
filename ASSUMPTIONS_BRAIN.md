@@ -376,11 +376,80 @@ The bake's INFO log still emits `pct_alpha_gt100` and `pct_alpha_gt200`. With v3
 - `pct_alpha_gt100`: 70–90 % (sensitivity is unchanged so most of the cortex still shows visible activity)
 - `pct_alpha_gt200`: 50–70 % (peak activations span both signs of z; positive z shows neon red, negative z shows opaque white)
 
-### 9.5 Open follow-ups (deliberately not done yet)
+### 9.5 Open follow-ups (legacy — landed in v4)
 
-- **GPU upsample to fsaverage6** — Meta's `*-upsample.bin` decoded (12-byte header + per-face 3 uint32 indices + 3 uint32 weights needing runtime normalization). Their full shader has the upsample branch already extracted. Adding this gives the smooth high-res inflated view Meta's "high" toggle produces. Skipped because Meta's screenshot uses low-res pial too — visual gap was the colormap, not the mesh density.
-- **Front/back split for clean glass rendering** — single-mesh `DoubleSide + depthWrite=false` is fine for our typical viewing angles. If overlap artifacts become user-visible, split.
-- **Emissive boost on peak activations** — would make active regions self-luminous (true "glow through" the transparent shell). Easy follow-up via patching `<emissivemap_fragment>` to write `totalEmissiveRadiance += diffuseColor.rgb * activationStrength`.
+These items were called out for v3 follow-up; v4 (§9.6) closes most of them.
+
+- **GPU upsample to fsaverage6** — still skipped. Meta's screenshot uses low-res pial too; the visual gap was the colormap, not the mesh density.
+- ~~**Front/back split for clean glass rendering**~~ — landed in v4.
+- ~~**Emissive boost on peak activations**~~ — landed in v4.
+
+### 9.6 v4 — neon glass with HDR emissive + bloom (current)
+
+Pivot driven by carrying the open follow-ups from §9.5 forward into a coherent "glass cortex" look.
+
+#### Front/back mesh split
+
+Each hemisphere now ships **two `THREE.Mesh` instances** sharing one `BufferGeometry`:
+- `back`: `side: THREE.BackSide`, `renderOrder = 0`, `uBackDim = 0.55`. Renders inner walls first, dimmed.
+- `front`: `side: THREE.FrontSide`, `renderOrder = 1`, `uBackDim = 1.0`. Renders outer surface on top.
+
+Both materials are `MeshStandardMaterial({ transparent: true, depthWrite: false })` and share scalar uniforms (`uFrame0/uFrame1/uAlpha` written through both copies in `BrainScene.setTime`). The split eliminates the painter's-algorithm sort artifacts mentioned in §9.3 and gives the cortex genuine depth — back-side dimming reads as subsurface attenuation through the glass shell.
+
+#### HDR emissive boost on activations
+
+The fragment shader now derives an **activation strength** from the green channel of the sampled atlas color (`activation = clamp((1 - g - 0.04) * 1.20, 0, 1)`). The white base has `g ≈ 0.97` so activation ≈ 0; neon red has `g ≈ 0.05` so activation ≈ 1. No new wire-format channel needed.
+
+Activation drives `totalEmissiveRadiance += diffuseColor.rgb * activation * uEmissiveBoost` (with `uEmissiveBoost = 1.6`), which lights active faces from within and pushes their fragment color past the bloom threshold of 1.0.
+
+#### Fresnel rim glow
+
+After `<emissivemap_fragment>`, a fresnel term (`pow(1 - dot(view, normal), uFresnelPower=2.4) * uFresnelStrength=1.4`) injects a cool-tinted (`#86a8ff`) rim emission. This silhouettes the cortex against the dark scene, gives the glass shell volumetric depth, and survives bloom so the rim faintly halos.
+
+#### Smoothstep temporal interpolation
+
+`uAlpha` is now passed through `smoothstep(0, 1, uAlpha)` before mixing the two TR samples. TR-to-TR transitions ease in/out instead of stepping linearly, hiding the discrete 1.5s cadence under playback.
+
+#### ACES Filmic + UnrealBloomPass
+
+Renderer is configured with `toneMapping = ACESFilmicToneMapping`, `toneMappingExposure = 1.05`, `outputColorSpace = SRGBColorSpace`. An `EffectComposer` chains: `RenderPass → UnrealBloomPass(strength=0.62, radius=0.5, threshold=1.0) → OutputPass`. Threshold 1.0 means only emissive-boosted active faces bloom — the resting shell (max RGB ≈ 0.99) stays clean.
+
+#### Pre-baked GLB normals
+
+`prepareFaceGeometry` no longer calls `computeVertexNormals` if the GLB ships a NORMAL attribute — the bake (`bake_brain_glbs.py`) already produces smooth per-vertex normals from the canonical fsaverage5 indexed topology. Saves ~50ms per hemisphere at load and matches what the bake intended.
+
+#### Opaque canvas
+
+The renderer now clears to `#0B0F14` (matches `--bg` in `globals.css`) opaque. Visually indistinguishable from the previous transparent canvas inside the dark `panel`, but gives the bloom pass a clean substrate (UnrealBloomPass over a transparent canvas leaks alpha-premultiplication artifacts into the halo).
+
+#### Bake changes
+
+`step2c_face_colors.py` updated:
+
+| Constant | v3 | v4 |
+|---|---|---|
+| `_NEON_RED` | `[1.00, 0.08, 0.28]` | `[1.00, 0.05, 0.24]` (lower g ⇒ stronger activation signal) |
+| `_BASE_ALPHA` | 0.22 | **0.18** (cleaner glass at rest, fresnel rim reads sharper) |
+| `_MAX_ALPHA` | 0.95 | 0.95 (unchanged) |
+| Alpha tail | `|z|` (both signs ⇒ suppression more opaque) | **positive z only** (suppression ≡ resting) |
+| Alpha ramp shape | linear | `a^0.75` (ease-out — mid-active faces climb out faster) |
+
+Wire format unchanged (`uint8_rgba_bin`, shape `(n_TRs, 20480, 4)`).
+
+#### Numbers to watch (updated for v4)
+
+`pct_alpha_gt100` and `pct_alpha_gt200` are still emitted per hemisphere:
+
+- `pct_alpha_gt100`: 20–45 % (alpha is now positive-z-only, so suppression no longer pads this stat)
+- `pct_alpha_gt200`: 5–15 % (peak active faces only)
+
+If `pct_alpha_gt200` is consistently 0 → upstream signal is flat or `_Z_MAX` is too high. If `pct_alpha_gt100` > 60 % → ramp/threshold drift; check `_Z_THRESH` and `_BASE_ALPHA`.
+
+### 9.7 Open follow-ups (deliberately not done yet)
+
+- **GPU upsample to fsaverage6** — still skipped (see §9.5).
+- **Selective bloom layer** — currently the whole scene goes through bloom at threshold 1.0. If non-active geometry ever needs to be added (e.g., subcortical structures, head outline), switching to `THREE.Layers`-based selective bloom would prevent unwanted halos.
+- **Sulcal darkening from `_SULC`** — the GLBs ship `_SULC` per vertex (curvature scalar). Mixing it into the diffuse RGB (`mix(0.55, 1.0, smoothstep(-0.5, 0.5, sulc))`) would darken sulci further and brighten gyri, complementing the directional lighting. Skipped for v4 because the per-vertex attribute survives `toNonIndexed()` but adds a varying and complicates the shader patch ordering. Easy follow-up.
 
 ---
 

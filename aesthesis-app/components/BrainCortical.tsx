@@ -1,33 +1,67 @@
 "use client"
 
-// Real cortical brain visualization — fsaverage5 inflated mesh, both
-// hemispheres, colored per-face from a pre-baked uint8 RGB stream.
+// Cortical brain visualization — fsaverage5 inflated/pial mesh, both
+// hemispheres, colored per-face from a pre-baked uint8 RGBA stream.
 //
-// IMPLEMENTATION NOTE: This component is hand-rolled three.js, not
-// @react-three/fiber. We're matching Meta's TRIBE v2 demo bit-for-bit
-// (bundle reverse-engineered in ASSUMPTIONS_BRAIN.md §7.0). Meta uses:
-//   - Custom GLSL shader injected via MeshStandardMaterial.onBeforeCompile
-//   - Per-face IDs as a vertex attribute (`aFace`) after un-indexing
-//   - DataTexture atlas of (n_TRs * n_faces, 3) uint8 RGB
-//   - Temporal interpolation (uFrame0 + uFrame1 + uAlpha) for smooth
-//     transitions between TRs
+// v4 — neon glass with HDR emissive + bloom (ASSUMPTIONS_BRAIN.md §9.6).
+// Builds on v3's per-face shader pattern (uniforms, atlasUV math, alpha
+// channel for activation strength) and adds:
 //
-// The vertex/fragment shader patches below are byte-equivalent to the
-// strings extracted from Meta's BrainViewer-15466291.js bundle. Same
-// uniforms, same atlasUV math, same toe-lift / black-floor / missing-
-// data handling.
+//   • Front/back mesh split per hemisphere with explicit renderOrder.
+//     Back faces render first (darkened), front faces overlay them. No
+//     more painter's-algorithm sort glitches on the glass shell.
+//   • Smoothstep on uAlpha — TR-to-TR transitions ease in/out instead of
+//     stepping linearly, hides the discrete TR cadence.
+//   • Fresnel rim glow injected into totalEmissiveRadiance — silhouettes
+//     the cortex in cool light, reads as glass volume not paint.
+//   • HDR emissive boost driven by per-face activation (extracted from
+//     the green channel — neon red has g≈0.08, white-base has g≈0.97).
+//     Active patches become self-luminous, feeding the bloom pass.
+//   • ACES Filmic tone mapping + UnrealBloomPass — real bloom rather
+//     than alpha-faked glow. Threshold is set so only active faces bloom.
+//
+// React only mounts/unmounts the canvas. Per-frame work is hand-rolled
+// three.js — no @react-three/fiber.
 
 import { useEffect, useRef } from "react"
 import * as THREE from "three"
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js"
 import { OrbitControls } from "three/addons/controls/OrbitControls.js"
+import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js"
+import { RenderPass } from "three/addons/postprocessing/RenderPass.js"
+import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js"
+import { OutputPass } from "three/addons/postprocessing/OutputPass.js"
 
 import type { ROIValues } from "@/lib/types"
 import type { AnalyzeResponse } from "@/lib/types"
 import Brain3D from "./Brain3D"
 
-type FaceColors = AnalyzeResponse["timeline"]["face_colors"]
+export type FaceColors = AnalyzeResponse["timeline"]["face_colors"]
 type Hemi = "left" | "right"
+export type Variant = "inflated" | "pial"
+
+export interface BrainSceneOptions {
+  // Run the EffectComposer + UnrealBloomPass chain. Off for the hero
+  // showcase where the canvas is transparent over the page gradients.
+  bloom?: boolean
+  // OrbitControls auto-rotate. autoRotate spins around the camera's up
+  // axis — change cameraUp to spin around a different anatomical axis.
+  autoRotate?: boolean
+  autoRotateSpeed?: number
+  // User input: rotate / zoom / pan. Off for the hero (passive showcase).
+  interactive?: boolean
+  // Transparent canvas — page background shows through. With transparent=true
+  // bloom is disabled regardless of `bloom` (UnrealBloomPass + transparent
+  // canvas leaks alpha-premultiplication artifacts into the halo).
+  transparent?: boolean
+  // Camera framing. Defaults match the results-page brain (up=Y, lateral
+  // 3/4 from the upper-left, looking at origin). Hero overrides with
+  // up=Z for an anatomical lateral lay-flat view, cameraTarget shifted
+  // down so the mesh renders higher in the panel.
+  cameraPosition?: [number, number, number]
+  cameraUp?: [number, number, number]
+  cameraTarget?: [number, number, number]
+}
 
 const LEFT_INFLATED = "/brain/fsaverage5-left-inflated.glb"
 const RIGHT_INFLATED = "/brain/fsaverage5-right-inflated.glb"
@@ -36,24 +70,19 @@ const RIGHT_PIAL = "/brain/fsaverage5-right-pial.glb"
 
 const FACES_PER_HEMI = 20480
 
+// Matches --bg in app/globals.css. The canvas paints opaque so the bloom
+// pass has a clean substrate; visually indistinguishable from transparent
+// over the same body bg because the panel covers nothing else here.
+const SCENE_CLEAR = 0x0b0f14
+
 interface BrainCorticalProps {
-  /** (n_TRs, 400) parcel z-scores. Fallback/debug only — face_colors is the renderer. */
   parcelSeries: number[][] | null
-  /** Per-face uint8 RGB stream from the TRIBE worker. Null → fall back to placeholder. */
   faceColors: FaceColors
-  /** Floor(currentTime / tr_duration_s) clamped to the valid range. */
   tIndex: number
-  /** Continuous time in seconds, used to interpolate between TRs (uAlpha). */
   currentTime: number
   trDurationS: number
-  /** ROI values consumed by the placeholder fallback only. */
   roiValues?: ROIValues
-  /**
-   * Surface type. "pial" = realistic gyri/sulci anatomy (matches Meta's
-   * "Normal" tab and screenshot). "inflated" = smoothed bubble that
-   * exposes sulcal interiors. Default "pial" for the realistic look.
-   */
-  variant?: "inflated" | "pial"
+  variant?: Variant
   size?: number
 }
 
@@ -73,17 +102,6 @@ function decodeBase64ToU8(b64: string): Uint8Array {
   return out
 }
 
-/**
- * Pack an RGBA (or legacy RGB) byte stream into a 2D atlas DataTexture.
- *
- * Atlas layout: linear index = frame * n_faces + face, then row-major
- * into a 2D texture with width capped at MAX_ATLAS_W. The shader's
- * atlasUV() function does the inverse mapping.
- *
- * Format auto-detected from byte count vs (nFrames * nFaces). RGBA
- * data lands as-is; RGB is expanded to RGBA with alpha=255. The
- * texture itself is always RGBA (three.js r165+ removed RGBFormat).
- */
 function buildAtlasTexture(
   bytes: Uint8Array,
   nFrames: number,
@@ -96,11 +114,11 @@ function buildAtlasTexture(
   const need = w * h * 4
   const padded = new Uint8Array(need)
   if (ch === 4) {
-    // RGBA stream — copy as-is (alpha already encodes the activation
-    // strength from the bake; shader writes it to diffuseColor.a).
     padded.set(bytes.subarray(0, total * 4))
   } else {
-    // Legacy RGB stream — expand to RGBA with full opacity.
+    // Legacy uint8_rgb_bin — pad to RGBA with full opacity. Old workers
+    // don't ship the activation-driven alpha, so they render as solid
+    // shells. Bloom still kicks in on red dominance.
     for (let i = 0; i < total; i++) {
       padded[i * 4 + 0] = bytes[i * 3 + 0]
       padded[i * 4 + 1] = bytes[i * 3 + 1]
@@ -114,16 +132,18 @@ function buildAtlasTexture(
   tex.wrapS = THREE.ClampToEdgeWrapping
   tex.wrapT = THREE.ClampToEdgeWrapping
   tex.generateMipmaps = false
+  tex.colorSpace = THREE.SRGBColorSpace
   tex.needsUpdate = true
   return { tex, w, h, nFrames, channels: ch }
 }
 
-// ─── Shader patches (byte-equivalent to Meta's BrainViewer bundle) ──────────
+// ─── Shader patches ─────────────────────────────────────────────────────────
 
 const VERT_COMMON = `#include <common>
 attribute float aFace;
 flat varying float vFaceIndex;
 `
+
 const VERT_BEGIN = `#include <begin_vertex>
 vFaceIndex = aFace;
 `
@@ -136,6 +156,11 @@ uniform float uNumFaces;
 uniform float uFrame0;
 uniform float uFrame1;
 uniform float uAlpha;
+uniform float uEmissiveBoost;
+uniform float uFresnelStrength;
+uniform float uFresnelPower;
+uniform vec3  uFresnelTint;
+uniform float uBackDim;
 
 flat varying float vFaceIndex;
 
@@ -148,31 +173,54 @@ vec2 atlasUV(float face, float frame) {
 }
 `
 
+// Replaces <map_fragment>. Sets diffuseColor (RGB + per-fragment alpha)
+// from the atlas with smoothstep'd temporal interpolation. uBackDim
+// (1.0 for the front mesh, ~0.55 for the back mesh) attenuates back-face
+// contribution so glass depth reads cleanly.
 const FRAG_MAP = `
-// Glass-brain shader path (RGBA atlas + transparent material).
-// Alpha channel of the atlas encodes activation strength: high alpha
-// for active patches (they read as solid color), low alpha for the
-// resting shell (it reads as a faint ghost outline). We flow alpha
-// into diffuseColor.a so the material's transparent flag controls
-// visibility per-fragment.
 vec4 c0 = texture2D(uFaceTex, atlasUV(vFaceIndex, uFrame0));
 vec4 c1 = texture2D(uFaceTex, atlasUV(vFaceIndex, uFrame1));
-vec4 finalColor = mix(c0, c1, uAlpha);
+float ta = smoothstep(0.0, 1.0, clamp(uAlpha, 0.0, 1.0));
+vec4 finalColor = mix(c0, c1, ta);
 
-// Slight toe lift (Meta's tuning: keeps contrast on the RGB channels).
+// Mild toe-lift keeps mid-zone reds from washing out under tone-mapping.
 finalColor.rgb = pow(finalColor.rgb, vec3(1.05));
-
-// Lower black floor so true shadows stay shadowy.
 finalColor.rgb = max(finalColor.rgb, vec3(0.012));
 
-// Missing-data fallback — but only override RGB; keep the texture's
-// alpha so the resting shell stays appropriately transparent.
+// Missing-data fallback — only override RGB, keep alpha.
 float rgbSum = finalColor.r + finalColor.g + finalColor.b;
 if (rgbSum < 0.001) {
   finalColor.rgb = vec3(0.045);
 }
 
+// Backside attenuation — rendered in pass 1 (renderOrder 0); the front
+// mesh in pass 2 (renderOrder 1) keeps full intensity.
+finalColor.rgb *= uBackDim;
+finalColor.a   *= mix(1.0, 0.55, 1.0 - uBackDim);
+
 diffuseColor.rgba = finalColor;
+`
+
+// Replaces <emissivemap_fragment>. Adds:
+//   • activation-driven emission (red dominance ⇒ self-luminous neon)
+//   • fresnel rim emission (cool tint at the silhouette)
+// Both flow into totalEmissiveRadiance, which the lighting pipeline adds
+// to the final fragment color and which UnrealBloomPass then samples.
+const FRAG_EMISSIVE = `#include <emissivemap_fragment>
+{
+  // White-base has g ≈ 0.97; neon red has g ≈ 0.08. (1 - g) is a clean
+  // single-tail "redness" signal — nothing extra in the wire format.
+  float activation = clamp((1.0 - diffuseColor.g - 0.04) * 1.20, 0.0, 1.0);
+
+  vec3 V = normalize(vViewPosition);
+  vec3 N = normalize(normal);
+  float fr = pow(1.0 - clamp(dot(V, N), 0.0, 1.0), uFresnelPower);
+
+  // Activation glow tracks the diffuse color so neon reds stay neon.
+  totalEmissiveRadiance += diffuseColor.rgb * activation * uEmissiveBoost;
+  // Cool-tinted rim — silhouette without recolouring the bulk of the cortex.
+  totalEmissiveRadiance += uFresnelTint * fr * uFresnelStrength;
+}
 `
 
 interface FaceMaterialUniforms {
@@ -183,29 +231,22 @@ interface FaceMaterialUniforms {
   uFrame0: { value: number }
   uFrame1: { value: number }
   uAlpha: { value: number }
+  uEmissiveBoost: { value: number }
+  uFresnelStrength: { value: number }
+  uFresnelPower: { value: number }
+  uFresnelTint: { value: THREE.Color }
+  uBackDim: { value: number }
 }
 
-/** Build a MeshStandardMaterial whose shader reads per-face from `uFaceTex`.
- *
- * Glass-brain configuration:
- *   transparent = true       — per-fragment alpha controls visibility
- *   depthWrite  = false      — overlapping faces blend instead of culling
- *   side        = DoubleSide — see both inner and outer surface
- *
- * With ``depthWrite=false`` you can get small ordering artifacts where
- * two transparent faces blend in the wrong order from certain camera
- * angles. For a roughly-convex brain mesh viewed from a single side
- * (which is our common case), the artifacts are minor. If they ever
- * become visible we can split into separate FrontSide + BackSide
- * meshes with explicit renderOrder — three.js community guidance from
- * the Codrops glass tutorial.
- */
-function makeFaceMaterial(uniforms: FaceMaterialUniforms): THREE.MeshStandardMaterial {
+function makeFaceMaterial(
+  uniforms: FaceMaterialUniforms,
+  side: THREE.Side,
+): THREE.MeshStandardMaterial {
   const mat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
-    roughness: 0.85,
-    metalness: 0.05,
-    side: THREE.DoubleSide,
+    roughness: 0.78,
+    metalness: 0.04,
+    side,
     transparent: true,
     depthWrite: false,
   })
@@ -217,34 +258,25 @@ function makeFaceMaterial(uniforms: FaceMaterialUniforms): THREE.MeshStandardMat
     shader.fragmentShader = shader.fragmentShader
       .replace("#include <common>", FRAG_COMMON)
       .replace("#include <map_fragment>", FRAG_MAP)
+      .replace("#include <emissivemap_fragment>", FRAG_EMISSIVE)
   }
   return mat
 }
 
-// ─── Geometry post-processing (un-index + aFace attribute) ──────────────────
+// ─── Geometry post-processing ───────────────────────────────────────────────
 
-/**
- * Un-index a geometry and add `aFace` per-vertex attribute = floor(vIdx/3).
- *
- * Critical for pial: compute SMOOTH per-vertex normals on the indexed
- * mesh first, then call toNonIndexed(). Three.js carries the normal
- * attribute through the un-index, so we end up with smooth shading on
- * the pial cortex (gyri/sulci read as real anatomy under directional
- * lights) AND per-face data via aFace.
- *
- * If we computed normals AFTER un-indexing, every face would have its
- * own three vertices that no other face shares, and the normals would
- * collapse to flat per-face normals — fine on the smooth inflated
- * surface, ugly on pial because the realistic anatomy looks faceted.
- */
 function prepareFaceGeometry(geom: THREE.BufferGeometry): THREE.BufferGeometry {
   const indexed = geom.clone()
-  // Smooth normals on the indexed mesh — vertex sharing averages face
-  // normals into per-vertex normals naturally. Required for pial; safe
-  // on inflated.
-  indexed.computeVertexNormals()
+  // The bake (scripts/bake_brain_glbs.py) ships pre-computed NORMAL,
+  // smoothed across the indexed pial topology. Re-using them avoids the
+  // ~50ms per-hemi computeVertexNormals cost AND is exactly what the
+  // bake intended (pial gyri/sulci read as anatomy under directional lights).
+  // Only fall back to computing if the GLB was authored without normals.
+  if (!indexed.attributes.normal) {
+    indexed.computeVertexNormals()
+  }
   const ng = indexed.index ? indexed.toNonIndexed() : indexed
-  const n = ng.attributes.position.count // n = 3 * nFaces after un-index
+  const n = ng.attributes.position.count
   const aFace = new Float32Array(n)
   const nFaces = Math.floor(n / 3)
   for (let i = 0; i < nFaces; i++) {
@@ -254,102 +286,148 @@ function prepareFaceGeometry(geom: THREE.BufferGeometry): THREE.BufferGeometry {
     aFace[v + 2] = i
   }
   ng.setAttribute("aFace", new THREE.BufferAttribute(aFace, 1))
-  // Note: do NOT call computeVertexNormals() again here — that would
-  // override the smooth normals we just transferred from the indexed
-  // mesh.
   return ng
 }
 
-// ─── Main scene class (raw three.js, no React rendering pipeline) ───────────
+// ─── Scene class ────────────────────────────────────────────────────────────
 
-class BrainScene {
+interface HemiPair {
+  geom: THREE.BufferGeometry
+  back: THREE.Mesh
+  front: THREE.Mesh
+  matBack: THREE.MeshStandardMaterial
+  matFront: THREE.MeshStandardMaterial
+  uniformsFront: FaceMaterialUniforms
+  uniformsBack: FaceMaterialUniforms
+  texture: THREE.DataTexture
+  nFrames: number
+}
+
+export class BrainScene {
   scene: THREE.Scene
   camera: THREE.PerspectiveCamera
   renderer: THREE.WebGLRenderer
   controls: OrbitControls
-  uniforms: { left: FaceMaterialUniforms; right: FaceMaterialUniforms } | null = null
-  meshes: { left: THREE.Mesh | null; right: THREE.Mesh | null } = { left: null, right: null }
-  textures: { left: THREE.DataTexture | null; right: THREE.DataTexture | null } = {
-    left: null,
-    right: null,
-  }
-  nFrames: { left: number; right: number } = { left: 1, right: 1 }
+  composer: EffectComposer | null
+  bloom: UnrealBloomPass | null
+  useBloom: boolean
+  hemis: { left: HemiPair | null; right: HemiPair | null } = { left: null, right: null }
   raf = 0
 
-  constructor(canvas: HTMLCanvasElement) {
+  constructor(canvas: HTMLCanvasElement, opts: BrainSceneOptions = {}) {
+    const transparent = opts.transparent ?? false
+    // Bloom + transparent canvas leak alpha-premultiplication artifacts
+    // into the halo, so disable bloom whenever the canvas is transparent.
+    this.useBloom = (opts.bloom ?? true) && !transparent
+    const interactive = opts.interactive ?? true
+    const autoRotate = opts.autoRotate ?? false
+    const autoRotateSpeed = opts.autoRotateSpeed ?? 0.6
+
     this.scene = new THREE.Scene()
-    this.scene.background = null
+    this.scene.background = transparent ? null : new THREE.Color(SCENE_CLEAR)
 
     this.camera = new THREE.PerspectiveCamera(28, 1, 0.1, 2000)
-    // Lateral 3/4 view of the LEFT hemisphere (matches Meta's demo).
-    // Brain is in MNI/freesurfer coordinates: X is L-R (left ≤ 0), Y is
-    // A-P, Z is I-S. Camera off to the left and slightly above gives
-    // the canonical anatomy-textbook angle.
-    this.camera.position.set(-260, 60, 180)
-    this.camera.lookAt(0, 0, 0)
+    // camera.up MUST be set BEFORE OrbitControls is constructed — the
+    // controls cache the up vector and use it as the spherical pole.
+    // Auto-rotate then spins around this axis.
+    //
+    // Defaults: anatomical lateral 3/4 view of the LEFT hemisphere with
+    // the superior axis (Z in MNI/freesurfer) as screen-up. AP axis lies
+    // horizontally, IS axis vertical — the canonical anatomy-textbook
+    // orientation for both the hero showcase and the results panel.
+    const [ux, uy, uz] = opts.cameraUp ?? [0, 0, 1]
+    this.camera.up.set(ux, uy, uz)
+    const [px, py, pz] = opts.cameraPosition ?? [-320, 92, 95]
+    this.camera.position.set(px, py, pz)
+    const [tx, ty, tz] = opts.cameraTarget ?? [0, 0, 0]
+    this.camera.lookAt(tx, ty, tz)
 
     this.renderer = new THREE.WebGLRenderer({
       canvas,
       antialias: true,
-      alpha: true,
-      premultipliedAlpha: false,
+      alpha: transparent,
+      premultipliedAlpha: !transparent,
+      powerPreference: "high-performance",
     })
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
-    this.renderer.setClearColor(0x000000, 0)
+    if (transparent) {
+      this.renderer.setClearColor(0x000000, 0)
+    } else {
+      this.renderer.setClearColor(SCENE_CLEAR, 1)
+    }
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping
+    this.renderer.toneMappingExposure = 1.05
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace
 
-    // Lighting tuned for white-base brain — Meta uses an ambient + soft
-    // directional combo so the gyri/sulci shadow gently. We keep the
-    // overall scene relatively bright since the diffuseColor coming
-    // from our texture is a creamy white at rest.
-    this.scene.add(new THREE.AmbientLight(0xffffff, 0.85))
-    const key = new THREE.DirectionalLight(0xffffff, 0.55)
-    key.position.set(-200, 200, 300) // upper-left key light (anatomy textbook angle)
+    this.scene.add(new THREE.AmbientLight(0xc8d4ff, 0.55))
+    const key = new THREE.DirectionalLight(0xfff4e6, 0.85)
+    key.position.set(-220, 220, 260)
     this.scene.add(key)
-    const fill = new THREE.DirectionalLight(0xffffff, 0.18)
-    fill.position.set(200, -100, -200)
+    const fill = new THREE.DirectionalLight(0x99b4ff, 0.35)
+    fill.position.set(180, -80, -200)
     this.scene.add(fill)
+    const rim = new THREE.DirectionalLight(0xb8c8ff, 0.45)
+    rim.position.set(0, -140, -300)
+    this.scene.add(rim)
 
-    // OrbitControls: rotate + zoom (with trackpad pinch). Pan stays off
-    // so the user can't accidentally drag the brain off-screen.
-    //
-    // Trackpad pinch: handled automatically by OrbitControls' wheel-event
-    // path. Two-finger pinch on macOS / Windows precision touchpad emits
-    // ctrl+wheel events (or scaled wheel events) that the controller
-    // reads as a dolly. Standard mouse-wheel also zooms.
-    //
-    // Distance limits prevent zoom-through (going inside the mesh) and
-    // zoom-to-infinity (losing the brain). The brain's bounding box is
-    // ~150 units wide; default camera distance is ~325, so [80, 700]
-    // gives a comfortable range from "filling the viewport" to
-    // "small thumbnail" without weirdness.
     this.controls = new OrbitControls(this.camera, canvas)
-    this.controls.enableRotate = true
-    this.controls.rotateSpeed = 1.0          // default — feels natural
-    this.controls.enableZoom = true
-    this.controls.zoomSpeed = 1.2            // snappier trackpad pinch
-    this.controls.zoomToCursor = true        // zoom toward cursor, not center
+    // OrbitControls orbits around `.target`, NOT around the camera's
+    // current lookAt. Match it to cameraTarget so auto-rotate spins
+    // around the user's intended pivot.
+    this.controls.target.set(tx, ty, tz)
+    this.controls.enableRotate = interactive
+    this.controls.rotateSpeed = 1.0
+    this.controls.enableZoom = interactive
+    this.controls.zoomSpeed = 1.2
+    this.controls.zoomToCursor = true
     this.controls.minDistance = 80
     this.controls.maxDistance = 700
     this.controls.enablePan = false
     this.controls.enableDamping = true
-    this.controls.dampingFactor = 0.1        // smooth post-release, no overshoot
+    this.controls.dampingFactor = 0.1
+    this.controls.autoRotate = autoRotate
+    // OrbitControls 0.6 ≈ 100s/orbit at 60fps — slow, contemplative
+    // showcase pace. autoRotate continues to spin even when the user
+    // can't drag (interactive=false) — they're independent.
+    this.controls.autoRotateSpeed = autoRotateSpeed
+
+    if (this.useBloom) {
+      this.composer = new EffectComposer(this.renderer)
+      this.composer.addPass(new RenderPass(this.scene, this.camera))
+      this.bloom = new UnrealBloomPass(
+        new THREE.Vector2(canvas.width, canvas.height),
+        0.62,
+        0.5,
+        1.0,
+      )
+      this.composer.addPass(this.bloom)
+      this.composer.addPass(new OutputPass())
+    } else {
+      this.composer = null
+      this.bloom = null
+    }
 
     const animate = () => {
       this.raf = requestAnimationFrame(animate)
       this.controls.update()
-      this.renderer.render(this.scene, this.camera)
+      if (this.composer) {
+        this.composer.render()
+      } else {
+        this.renderer.render(this.scene, this.camera)
+      }
     }
     animate()
   }
 
   resize(w: number, h: number) {
     this.renderer.setSize(w, h, false)
+    this.composer?.setSize(w, h)
+    this.bloom?.setSize(w, h)
     this.camera.aspect = w / h
     this.camera.updateProjectionMatrix()
   }
 
-  /** Load both hemispheres' GLBs + bind face-color uniforms. */
-  async loadHemispheres(variant: "inflated" | "pial", colors: FaceColors): Promise<void> {
+  async loadHemispheres(variant: Variant, colors: FaceColors): Promise<void> {
     if (!colors) return
     const loader = new GLTFLoader()
     const leftUrl = variant === "inflated" ? LEFT_INFLATED : LEFT_PIAL
@@ -361,7 +439,7 @@ class BrainScene {
     ])
     logBC("info", "GLBs loaded", { variant, left: leftUrl, right: rightUrl })
 
-    this.uniforms = {
+    this.hemis = {
       left: this.bindHemisphere("left", leftGlb, colors.left),
       right: this.bindHemisphere("right", rightGlb, colors.right),
     }
@@ -371,7 +449,7 @@ class BrainScene {
     hemi: Hemi,
     gltf: { scene: THREE.Group },
     payload: NonNullable<FaceColors>["left"],
-  ): FaceMaterialUniforms {
+  ): HemiPair {
     let baseMesh: THREE.Mesh | null = null
     gltf.scene.traverse((obj) => {
       if (!baseMesh && obj instanceof THREE.Mesh) baseMesh = obj
@@ -381,9 +459,6 @@ class BrainScene {
     const m: THREE.Mesh = baseMesh
     const geom = prepareFaceGeometry(m.geometry as THREE.BufferGeometry)
 
-    // Build the atlas texture from the base64 stream. New format
-    // (uint8_rgba_bin) carries alpha; legacy (uint8_rgb_bin) does not.
-    // buildAtlasTexture auto-detects from byte count.
     const bytes = decodeBase64ToU8(payload.data_b64)
     const nFrames = payload.n_frames
     const nFaces = payload.n_faces
@@ -391,14 +466,16 @@ class BrainScene {
       logBC("warn", `${hemi}: face count ${nFaces} != ${FACES_PER_HEMI}`)
     }
     const { tex, w, h, channels } = buildAtlasTexture(bytes, nFrames, nFaces)
-    this.textures[hemi] = tex
-    this.nFrames[hemi] = nFrames
     logBC("info", `${hemi}: atlas built`, {
-      w, h, nFrames, nFaces, bytes: bytes.length, channels,
-      format: payload.format,
+      w, h, nFrames, nFaces, bytes: bytes.length, channels, format: payload.format,
     })
 
-    const uniforms: FaceMaterialUniforms = {
+    // Two materials per hemi share the SAME texture + scalar uniforms,
+    // but each material gets its own copy of the uniform refs (so
+    // onBeforeCompile sees them as live). Time uniforms are written by
+    // setTime through both objects.
+    const fresnelTint = new THREE.Color(0x86a8ff)
+    const baseUniforms = (uBackDim: number): FaceMaterialUniforms => ({
       uFaceTex: { value: tex },
       uAtlasW: { value: w },
       uAtlasH: { value: h },
@@ -406,49 +483,79 @@ class BrainScene {
       uFrame0: { value: 0 },
       uFrame1: { value: 0 },
       uAlpha: { value: 0 },
+      uEmissiveBoost: { value: 1.6 },
+      uFresnelStrength: { value: 1.4 },
+      uFresnelPower: { value: 2.4 },
+      uFresnelTint: { value: fresnelTint.clone() },
+      uBackDim: { value: uBackDim },
+    })
+
+    const uniformsFront = baseUniforms(1.0)
+    const uniformsBack = baseUniforms(0.55)
+
+    const matFront = makeFaceMaterial(uniformsFront, THREE.FrontSide)
+    const matBack = makeFaceMaterial(uniformsBack, THREE.BackSide)
+
+    const back = new THREE.Mesh(geom, matBack)
+    back.renderOrder = 0
+    const front = new THREE.Mesh(geom, matFront)
+    front.renderOrder = 1
+
+    this.scene.add(back)
+    this.scene.add(front)
+
+    return {
+      geom,
+      back,
+      front,
+      matBack,
+      matFront,
+      uniformsFront,
+      uniformsBack,
+      texture: tex,
+      nFrames,
     }
-    const mat = makeFaceMaterial(uniforms)
-    const newMesh = new THREE.Mesh(geom, mat)
-    this.scene.add(newMesh)
-    this.meshes[hemi] = newMesh
-    return uniforms
   }
 
-  /** Drive uFrame0 / uFrame1 / uAlpha from continuous time. */
   setTime(currentTime: number, trDurationS: number): void {
-    if (!this.uniforms) return
     const tr = trDurationS || 1.5
     for (const hemi of ["left", "right"] as const) {
-      const u = this.uniforms[hemi]
-      const max = Math.max(0, this.nFrames[hemi] - 1)
+      const pair = this.hemis[hemi]
+      if (!pair) continue
+      const max = Math.max(0, pair.nFrames - 1)
       const raw = currentTime / tr
       const f0 = Math.max(0, Math.min(max, Math.floor(raw)))
       const f1 = Math.max(0, Math.min(max, f0 + 1))
       const alpha = Math.max(0, Math.min(1, raw - Math.floor(raw)))
-      u.uFrame0.value = f0
-      u.uFrame1.value = f1
-      u.uAlpha.value = alpha
+      pair.uniformsFront.uFrame0.value = f0
+      pair.uniformsFront.uFrame1.value = f1
+      pair.uniformsFront.uAlpha.value = alpha
+      pair.uniformsBack.uFrame0.value = f0
+      pair.uniformsBack.uFrame1.value = f1
+      pair.uniformsBack.uAlpha.value = alpha
     }
   }
 
   dispose(): void {
     cancelAnimationFrame(this.raf)
     this.controls.dispose()
-    for (const m of [this.meshes.left, this.meshes.right]) {
-      if (m) {
-        this.scene.remove(m)
-        m.geometry.dispose()
-        ;(m.material as THREE.Material).dispose()
-      }
+    for (const hemi of ["left", "right"] as const) {
+      const pair = this.hemis[hemi]
+      if (!pair) continue
+      this.scene.remove(pair.back)
+      this.scene.remove(pair.front)
+      pair.geom.dispose()
+      pair.matBack.dispose()
+      pair.matFront.dispose()
+      pair.texture.dispose()
     }
-    for (const t of [this.textures.left, this.textures.right]) {
-      if (t) t.dispose()
-    }
+    this.bloom?.dispose()
+    this.composer?.dispose()
     this.renderer.dispose()
   }
 }
 
-// ─── React wrapper (mounting / unmounting only, no per-frame React) ─────────
+// ─── React wrapper ──────────────────────────────────────────────────────────
 
 export default function BrainCortical({
   parcelSeries,
@@ -478,11 +585,9 @@ export default function BrainCortical({
     const sc = new BrainScene(canvas)
     sceneRef.current = sc
 
-    // Initial size
     const c = containerRef.current!
     sc.resize(c.clientWidth, c.clientHeight)
 
-    // Resize observer
     const ro = new ResizeObserver(() => {
       const w = c.clientWidth
       const h = c.clientHeight
@@ -505,9 +610,13 @@ export default function BrainCortical({
     sceneRef.current?.setTime(currentTime, trDurationS)
   }, [currentTime, trDurationS, tIndex])
 
+  // Subtle up-right shift on the rendered output. Applied post-projection
+  // so OrbitControls' rotation pivot doesn't drift across the orbit
+  // (a world-space target / camera offset would oscillate the visual
+  // offset as the user rotates).
   const containerStyle = size != null
-    ? { width: size, height: size }
-    : { width: "100%", height: "100%" }
+    ? { width: size, height: size, transform: "translate(20px, -20px)" }
+    : { width: "100%", height: "100%", transform: "translate(20px, -20px)" }
 
   if (useFallback) {
     return <Brain3D roiValues={roiValues} size={size} />

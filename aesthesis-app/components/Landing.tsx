@@ -4,7 +4,10 @@ import { lazy, Suspense } from "react"
 import { motion } from "framer-motion"
 import AuthButton from "./AuthButton"
 
-const Brain3D = lazy(() => import("./Brain3D"))
+// Hero brain — same cortical visualization the results page uses, driven
+// by a client-side synthetic activation sequence. Lazy so the heavy three.js
+// + GLB chunks don't block first paint of the hero copy.
+const BrainHero = lazy(() => import("./BrainHero"))
 
 interface LandingProps {
   onCaptureAndAssess: () => void
@@ -205,22 +208,22 @@ export default function Landing({ onCaptureAndAssess, onSkipToAssess }: LandingP
         <div className="relative flex items-center justify-center h-full">
           {/* Glow behind brain */}
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-            <div className="w-[440px] h-[440px] rounded-full"
+            <div className="w-[600px] h-[600px] rounded-full"
               style={{ background: "radial-gradient(circle, rgba(124,156,255,0.1) 0%, rgba(92,242,197,0.04) 45%, transparent 70%)", filter: "blur(8px)" }} />
           </div>
 
           {/* Decorative rings */}
-          <motion.div className="absolute w-[480px] h-[480px] rounded-full"
+          <motion.div className="absolute w-[660px] h-[660px] rounded-full"
             style={{ border: "1px solid rgba(124,156,255,0.08)" }}
             animate={{ rotate: 360 }}
             transition={{ duration: 90, repeat: Infinity, ease: "linear" }}
           />
-          <motion.div className="absolute w-[360px] h-[360px] rounded-full"
+          <motion.div className="absolute w-[490px] h-[490px] rounded-full"
             style={{ border: "1px solid rgba(92,242,197,0.06)" }}
             animate={{ rotate: -360 }}
             transition={{ duration: 60, repeat: Infinity, ease: "linear" }}
           />
-          <div className="absolute w-[260px] h-[260px] rounded-full"
+          <div className="absolute w-[350px] h-[350px] rounded-full"
             style={{ border: "1px solid rgba(255,255,255,0.04)" }} />
 
           {/* Brain */}
@@ -230,7 +233,7 @@ export default function Landing({ onCaptureAndAssess, onSkipToAssess }: LandingP
             transition={{ duration: 1.1, delay: 0.1, ease: [0.16, 1, 0.3, 1] }}
           >
             <Suspense fallback={<BrainFallback />}>
-              <Brain3D size={400} />
+              <BrainHero size={540} />
             </Suspense>
           </motion.div>
 
@@ -359,7 +362,7 @@ export default function Landing({ onCaptureAndAssess, onSkipToAssess }: LandingP
 
 function BrainFallback() {
   return (
-    <div className="flex items-center justify-center" style={{ width: 400, height: 400 }}>
+    <div className="flex items-center justify-center" style={{ width: 540, height: 540 }}>
       <motion.div
         className="w-20 h-20 rounded-full"
         style={{ border: "2px solid rgba(124,156,255,0.2)", borderTopColor: "#7C9CFF" }}

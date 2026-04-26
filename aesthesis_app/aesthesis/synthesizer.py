@@ -69,6 +69,7 @@ async def _call_gemini(prompt: str, *, cfg: AppConfig, model_name: str,
 
     try:
         import google.generativeai as genai  # type: ignore
+        from google.api_core import retry as _retries  # type: ignore
     except ImportError as e:
         raise SynthesizerError(
             "google-generativeai not installed. "
@@ -88,10 +89,15 @@ async def _call_gemini(prompt: str, *, cfg: AppConfig, model_name: str,
                "model": model_name, "n_images": len(images or [])},
     )
     model = genai.GenerativeModel(model_name)
+    # Disable SDK-level retries — fail fast so an empty/blocked response
+    # surfaces immediately instead of stalling the request for ~70s while
+    # the api_core layer retries against the same failure mode.
+    no_retry = _retries.AsyncRetry(predicate=lambda _exc: False)
     resp = await model.generate_content_async(
         parts,
         generation_config={"response_mime_type": "application/json",
                            "temperature": 0.2},
+        request_options={"retry": no_retry},
     )
     text = _strip_code_fence(resp.text)
     try:

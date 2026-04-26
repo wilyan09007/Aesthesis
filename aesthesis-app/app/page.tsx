@@ -34,6 +34,18 @@ export default function Home() {
 
   const abortRef = useRef<AbortController | null>(null)
 
+  // ── DEMO ESCAPE HATCH — visit /?demo to jump straight to the results
+  // page with a fixture. Delete this block + lib/demoResults.ts to revert.
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    if (!new URLSearchParams(window.location.search).has("demo")) return
+    import("@/lib/demoResults").then(({ demoAnalyzeResponse }) => {
+      setResults(adaptForResultsView(demoAnalyzeResponse))
+      setState("results")
+    })
+  }, [])
+  // ── /DEMO ESCAPE HATCH
+
   const [historyOpen, setHistoryOpen] = useState(false)
   const [savedRunId, setSavedRunId] = useState<string | null>(null)
   const [compareRunId, setCompareRunId] = useState<string | null>(null)
