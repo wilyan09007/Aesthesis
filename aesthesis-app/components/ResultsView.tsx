@@ -120,7 +120,10 @@ export default function ResultsView({ data, videoFile, onReset }: ResultsViewPro
                 <Suspense fallback={<BrainFallback />}>
                   <BrainCortical
                     parcelSeries={data.parcel_series}
+                    faceColors={data.face_colors}
                     tIndex={tIndex}
+                    currentTime={currentTime}
+                    trDurationS={data.tr_duration_s}
                     roiValues={currentROI}
                   />
                 </Suspense>

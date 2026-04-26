@@ -81,10 +81,27 @@ export type TimelineSummary = {
   windows: Array<Record<string, unknown>>
   processing_time_ms: number
   // Per-parcel z-scored activations (Schaefer-400 atlas, fsaverage5).
-  // Shape (n_TRs, 400). Drives BrainCortical.tsx. Null when the TRIBE
-  // worker hasn't been re-baked with the parcel map — frontend falls
-  // back to the placeholder geometry. See ASSUMPTIONS_BRAIN.md §1.3.
+  // Shape (n_TRs, 400). Kept as a fallback / debugging signal; the
+  // primary brain renderer uses face_colors below. See
+  // ASSUMPTIONS_BRAIN.md §1.3.
   parcel_series: number[][] | null
+  // Per-face uint8 RGB stream — matches Meta's TRIBE v2 demo format
+  // exactly. shape per hemi = (n_TRs, 20480, 3). data_b64 is base64 of
+  // the C-contiguous binary. When present, BrainCortical renders via
+  // the per-face shader pattern Meta uses (sharp boundaries, GPU-only
+  // sampling, zero CPU per frame).
+  face_colors: {
+    left: HemisphereFaceColors
+    right: HemisphereFaceColors
+  } | null
+}
+
+export type HemisphereFaceColors = {
+  format: "uint8_rgb_bin"
+  shape: [number, number, number] // [n_frames, n_faces, 3]
+  n_frames: number
+  n_faces: number
+  data_b64: string
 }
 
 export type AnalyzeRequestMeta = {
