@@ -24,75 +24,88 @@ const STAGES = [
   "Generating insights…",
 ]
 
-const HOLD_AT_PCT = 95 // hold the last stage at this % until the response arrives
+// Stage-start thresholds on the 0-MAX_PRE_ARRIVAL curve below. Stage 4
+// (Gemini) is the bulk of real runs, so we let it span the largest range.
+const STAGE_THRESHOLDS = [0, 17, 42, 64] as const
+
+// Visible cap before the backend responds. Sits clearly below 100% so the
+// bar can never look "finished" while we're still waiting on the response.
+const MAX_PRE_ARRIVAL = 92
+
+// Exponential time constant (ms). Calibrated against an observed end-to-end
+// pipeline time of ~165s (TRIBE GPU + Gemini): the bar reaches ~20% at 6s,
+// ~37% at 13s, ~64% at 30s, ~84% at 60s, ~91% at 120s, ~92% (cap) by ~150s.
+const TIME_CONSTANT = 25000
+
+// Past this elapsed time we stop estimating and switch the message to a
+// clearly indeterminate "taking longer than usual" state instead of letting
+// the bar plateau silently.
+const LONG_RUNNING_MS = 45000
 
 type PanelState = {
   stageIndex: number
-  progress: number
+  progress: number  // 0-100 within current stage
+  overall: number   // 0-MAX_PRE_ARRIVAL pre-arrival, 100 once resolved
+  elapsed: number   // ms since start
   done: boolean
 }
 
-function usePanelProgress(
-  delay: number,
-  onDone: () => void,
-  isResolved: boolean,
-): PanelState {
+function usePanelProgress(onDone: () => void, isResolved: boolean): PanelState {
   const [stageIndex, setStageIndex] = useState(0)
   const [progress, setProgress] = useState(0)
+  const [overall, setOverall] = useState(0)
+  const [elapsed, setElapsed] = useState(0)
   const [done, setDone] = useState(false)
+  const startTime = useRef(Date.now())
   const onDoneRef = useRef(onDone)
   onDoneRef.current = onDone
-  const isResolvedRef = useRef(isResolved)
-  isResolvedRef.current = isResolved
 
+  // Tick: drive progress from wall-clock elapsed time
   useEffect(() => {
-    let tick: ReturnType<typeof setInterval> | null = null
+    const tick = setInterval(() => {
+      const ms = Date.now() - startTime.current
+      const naturalOverall = MAX_PRE_ARRIVAL * (1 - Math.exp(-ms / TIME_CONSTANT))
 
-    const startTimer = setTimeout(() => {
-      let currentStage = 0
-      let currentProgress = 0
+      // Which stage are we in?
+      let stage = STAGES.length - 1
+      for (let i = STAGE_THRESHOLDS.length - 1; i >= 0; i--) {
+        if (naturalOverall >= STAGE_THRESHOLDS[i]) { stage = i; break }
+      }
 
-      tick = setInterval(() => {
-        const lastStage = currentStage === STAGES.length - 1
+      // Progress within the current stage (0-100). The last stage's virtual
+      // end is 100 (not MAX_PRE_ARRIVAL) so it never visually fills while
+      // we're still waiting on the backend.
+      const stageStart = STAGE_THRESHOLDS[stage]
+      const stageEnd = stage < STAGE_THRESHOLDS.length - 1
+        ? STAGE_THRESHOLDS[stage + 1]
+        : 100
+      const withinStage = stageEnd > stageStart
+        ? Math.min(100, ((naturalOverall - stageStart) / (stageEnd - stageStart)) * 100)
+        : 0
 
-        if (lastStage && !isResolvedRef.current && currentProgress >= HOLD_AT_PCT) {
-          setProgress(HOLD_AT_PCT)
-          return
-        }
+      setStageIndex(stage)
+      setProgress(withinStage)
+      setOverall(naturalOverall)
+      setElapsed(ms)
+    }, 150)
 
-        currentProgress += Math.random() * 8 + 4
+    return () => clearInterval(tick)
+  }, [])
 
-        if (currentProgress >= 100) {
-          if (lastStage && !isResolvedRef.current) {
-            currentProgress = HOLD_AT_PCT
-            setProgress(HOLD_AT_PCT)
-            return
-          }
-          currentProgress = 100
-          currentStage++
+  // When the backend responds, complete immediately
+  useEffect(() => {
+    if (!isResolved || done) return
+    setStageIndex(STAGES.length - 1)
+    setProgress(100)
+    setOverall(100)
+    const t = setTimeout(() => {
+      setDone(true)
+      onDoneRef.current()
+    }, 500)
+    return () => clearTimeout(t)
+  }, [isResolved, done])
 
-          if (currentStage >= STAGES.length) {
-            if (tick) clearInterval(tick)
-            setDone(true)
-            onDoneRef.current()
-            return
-          }
-
-          setStageIndex(currentStage)
-          currentProgress = 0
-        }
-
-        setProgress(Math.min(100, currentProgress))
-      }, 120)
-    }, delay)
-
-    return () => {
-      clearTimeout(startTimer)
-      if (tick) clearInterval(tick)
-    }
-  }, [delay])
-
-  return { stageIndex, progress, done }
+  return { stageIndex, progress, overall, elapsed, done }
 }
 
 export default function AnalyzingView({
@@ -107,7 +120,7 @@ export default function AnalyzingView({
   const onCompleteRef = useRef(onComplete)
   onCompleteRef.current = onComplete
 
-  const panel = usePanelProgress(0, () => setDone(true), isResolved)
+  const panel = usePanelProgress(() => setDone(true), isResolved)
 
   useEffect(() => {
     if (done) {
@@ -215,7 +228,7 @@ export default function AnalyzingView({
         >
           {isResolved
             ? "Response received — finalizing UI"
-            : "Pipeline takes ~6–13s end-to-end (TRIBE GPU + Gemini)"}
+            : "Pipeline typically takes 1–3 minutes (TRIBE GPU + Gemini)"}
         </motion.p>
       )}
     </div>
@@ -231,16 +244,18 @@ interface AnalyzingPanelProps {
 const ACCENT = "#7C9CFF"
 
 function AnalyzingPanel({ videoFile, state, isResolved }: AnalyzingPanelProps) {
-  const { stageIndex, progress, done } = state
+  const { stageIndex, progress, overall, elapsed, done } = state
   const videoUrlRef = useRef<string | null>(null)
 
   if (videoFile && !videoUrlRef.current) {
     videoUrlRef.current = URL.createObjectURL(videoFile)
   }
 
-  const overallProgress = done
-    ? 100
-    : ((stageIndex * 100 + progress) / (STAGES.length * 100)) * 100
+  // Use the time-based curve directly: it's already capped at MAX_PRE_ARRIVAL,
+  // so the bar can't reach 99% before the backend actually responds.
+  const overallProgress = (done || isResolved) ? 100 : Math.min(overall, MAX_PRE_ARRIVAL)
+  const longRunning = !done && !isResolved && elapsed > LONG_RUNNING_MS
+  const elapsedSec = Math.floor(elapsed / 1000)
 
   return (
     <motion.div
@@ -305,9 +320,11 @@ function AnalyzingPanel({ videoFile, state, isResolved }: AnalyzingPanelProps) {
           >
             {done
               ? "Analysis complete"
-              : !isResolved && stageIndex === STAGES.length - 1
-                ? `${STAGES[stageIndex]} (waiting on Gemini…)`
-                : STAGES[stageIndex]}
+              : longRunning
+                ? `${STAGES[stageIndex]} · taking longer than usual…`
+                : !isResolved && stageIndex === STAGES.length - 1
+                  ? `${STAGES[stageIndex]} (waiting on Gemini…)`
+                  : STAGES[stageIndex]}
           </motion.p>
         </AnimatePresence>
 
@@ -334,7 +351,9 @@ function AnalyzingPanel({ videoFile, state, isResolved }: AnalyzingPanelProps) {
 
         <div className="flex items-center justify-between">
           <p className="text-xs" style={{ color: "rgba(255,255,255,0.3)" }}>
-            {done ? `Stage ${STAGES.length}/${STAGES.length}` : `Stage ${stageIndex + 1}/${STAGES.length}`}
+            {done
+              ? `Stage ${STAGES.length}/${STAGES.length} · ${elapsedSec}s`
+              : `Stage ${stageIndex + 1}/${STAGES.length} · ${elapsedSec}s elapsed`}
           </p>
           <p className="text-xs font-mono" style={{ color: ACCENT }}>
             {overallProgress.toFixed(0)}%
