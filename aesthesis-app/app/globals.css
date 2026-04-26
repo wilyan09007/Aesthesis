@@ -1,11 +1,11 @@
 @import "tailwindcss";
 
 :root {
-  --bg: #0B0F14;
-  --panel: rgba(255, 255, 255, 0.04);
+  --bg: #000000;
+  --panel: #0A0A0A;
   --border: rgba(255, 255, 255, 0.08);
-  --primary: #7C9CFF;
-  --accent: #5CF2C5;
+  --primary: #E0454D;
+  --accent: #E0454D;
   --danger: #FF6B6B;
   --text-muted: rgba(255, 255, 255, 0.45);
 }
@@ -52,11 +52,11 @@ body {
 }
 
 .glow-primary {
-  box-shadow: 0 0 24px rgba(124, 156, 255, 0.18), 0 0 80px rgba(124, 156, 255, 0.06);
+  box-shadow: 0 0 24px rgba(224, 69, 77, 0.18), 0 0 80px rgba(224, 69, 77, 0.06);
 }
 
 .glow-accent {
-  box-shadow: 0 0 24px rgba(92, 242, 197, 0.18), 0 0 80px rgba(92, 242, 197, 0.06);
+  box-shadow: 0 0 24px rgba(224, 69, 77, 0.18), 0 0 80px rgba(224, 69, 77, 0.06);
 }
 
 .panel {

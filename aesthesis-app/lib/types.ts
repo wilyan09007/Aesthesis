@@ -135,16 +135,7 @@ export type ValidationFailure = {
 
 // ── Local UI types ─────────────────────────────────────────────────────────
 
-export type AppState = "landing" | "capture" | "assess" | "analyzing" | "results"
-
-export type CaptureInputs = {
-  url: string
-  goal: string
-}
-
-export type WSMessage =
-  | { type: "frame"; frame_b64: string }
-  | { type: "stream_degraded" }
+export type AppState = "landing" | "assess" | "analyzing" | "results"
 
 // ── ROI display constants ──────────────────────────────────────────────────
 
@@ -173,9 +164,9 @@ export const ROI_LABELS: Record<ROIKey, string> = {
 export const ROI_COLORS: Record<ROIKey, string> = {
   aesthetic_appeal: "#A78BFA",
   visual_fluency: "#38BDF8",
-  cognitive_load: "#7C9CFF",
+  cognitive_load: "#E0454D",
   trust_affinity: "#34D399",
-  reward_anticipation: "#5CF2C5",
+  reward_anticipation: "#FFB088",
   motor_readiness: "#FBBF24",
   surprise_novelty: "#F472B6",
   friction_anxiety: "#FF6B6B",

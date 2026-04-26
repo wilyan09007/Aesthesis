@@ -14,7 +14,7 @@ interface VideoPlayerProps {
   onDuration?: (d: number) => void
 }
 
-const ACCENT = "#7C9CFF"
+const ACCENT = "#E0454D"
 
 export default function VideoPlayer({ file, currentTime, onTimeUpdate, onDuration }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null)

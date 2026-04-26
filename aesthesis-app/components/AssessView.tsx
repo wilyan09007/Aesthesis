@@ -3,15 +3,13 @@
 import { useState } from "react"
 import { motion } from "framer-motion"
 import UploadZone from "./UploadZone"
-import type { CaptureInputs } from "@/lib/types"
 
 interface AssessViewProps {
-  captureInputs: CaptureInputs | null
   onAnalyze: (file: File) => void
   onBack: () => void
 }
 
-export default function AssessView({ captureInputs, onAnalyze, onBack }: AssessViewProps) {
+export default function AssessView({ onAnalyze, onBack }: AssessViewProps) {
   const [file, setFile] = useState<File | null>(null)
 
   const canAnalyze = file !== null
@@ -30,18 +28,6 @@ export default function AssessView({ captureInputs, onAnalyze, onBack }: AssessV
           Back
         </button>
 
-        <div className="flex items-center gap-2 text-xs" style={{ color: "rgba(255,255,255,0.35)" }}>
-          <div className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-medium"
-            style={{ background: captureInputs ? "rgba(124,156,255,0.15)" : "rgba(255,255,255,0.06)", color: captureInputs ? "#7C9CFF" : "rgba(255,255,255,0.3)" }}>
-            ✓
-          </div>
-          <span style={{ color: "rgba(255,255,255,0.15)" }}>—</span>
-          <div className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-medium"
-            style={{ background: "rgba(124,156,255,0.2)", color: "#7C9CFF" }}>
-            2
-          </div>
-        </div>
-
         <div className="w-16" />
       </div>
 
@@ -53,28 +39,6 @@ export default function AssessView({ captureInputs, onAnalyze, onBack }: AssessV
             Drop a screen recording of any product flow. The neural pipeline reads it second-by-second and tells you exactly where attention, friction, and intent showed up.
           </p>
         </motion.div>
-
-        {captureInputs && (
-          <motion.div
-            className="panel rounded-xl p-4 flex items-center gap-4"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ delay: 0.1 }}
-          >
-            <div className="w-7 h-7 rounded-full flex items-center justify-center" style={{ background: "rgba(92,242,197,0.1)" }}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#5CF2C5" strokeWidth="2">
-                <path d="M20 6L9 17l-5-5" />
-              </svg>
-            </div>
-            <div>
-              <p className="text-xs font-medium" style={{ color: "#5CF2C5" }}>Session captured</p>
-              <p className="text-xs mt-0.5" style={{ color: "rgba(255,255,255,0.35)" }}>
-                {captureInputs.url}
-                {captureInputs.goal && ` · Goal: ${captureInputs.goal}`}
-              </p>
-            </div>
-          </motion.div>
-        )}
 
         {/* Upload zone */}
         <motion.div
@@ -114,14 +78,14 @@ export default function AssessView({ captureInputs, onAnalyze, onBack }: AssessV
             disabled={!canAnalyze}
             className="flex items-center gap-2.5 px-8 py-3.5 rounded-xl text-sm font-medium transition-all"
             style={{
-              background: canAnalyze ? "linear-gradient(135deg, rgba(124,156,255,0.2), rgba(92,242,197,0.15))" : "rgba(255,255,255,0.04)",
-              border: canAnalyze ? "1px solid rgba(124,156,255,0.3)" : "1px solid rgba(255,255,255,0.06)",
+              background: canAnalyze ? "rgba(224,69,77,0.2)" : "rgba(255,255,255,0.04)",
+              border: canAnalyze ? "1px solid rgba(224,69,77,0.3)" : "1px solid rgba(255,255,255,0.06)",
               color: canAnalyze ? "#e8eaf0" : "rgba(255,255,255,0.25)",
               cursor: canAnalyze ? "pointer" : "not-allowed",
             }}
             whileHover={canAnalyze ? {
               scale: 1.02,
-              boxShadow: "0 0 30px rgba(124,156,255,0.2)",
+              boxShadow: "0 0 30px rgba(224,69,77,0.2)",
             } : {}}
             whileTap={canAnalyze ? { scale: 0.98 } : {}}
           >

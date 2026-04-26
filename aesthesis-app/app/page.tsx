@@ -4,7 +4,6 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { AnimatePresence, motion } from "framer-motion"
 import { useUser } from "@auth0/nextjs-auth0/client"
 import Landing from "@/components/Landing"
-import CaptureView from "@/components/CaptureView"
 import AssessView from "@/components/AssessView"
 import AnalyzingView from "@/components/AnalyzingView"
 import ResultsView from "@/components/ResultsView"
@@ -13,7 +12,7 @@ import ComparePanel from "@/components/ComparePanel"
 import AgentPanel from "@/components/AgentPanel"
 import { analyze, AnalyzeError, API_BASE_URL } from "@/lib/api"
 import { adaptForResultsView, type ResultsViewData } from "@/lib/adapt"
-import type { AppState, CaptureInputs } from "@/lib/types"
+import type { AppState } from "@/lib/types"
 
 const pageVariants = {
   initial: { opacity: 0, y: 12 },
@@ -27,7 +26,6 @@ export default function Home() {
   const { user } = useUser()
 
   const [state, setState] = useState<AppState>("landing")
-  const [captureInputs, setCaptureInputs] = useState<CaptureInputs | null>(null)
   const [videoFile, setVideoFile] = useState<File | null>(null)
   const [results, setResults] = useState<ResultsViewData | null>(null)
   const [analyzeError, setAnalyzeError] = useState<string | null>(null)
@@ -60,7 +58,6 @@ export default function Home() {
     action()
   }, [user])
 
-  const goCapture = useCallback(() => requireAuth(() => setState("capture")), [requireAuth])
   const goAssess = useCallback(() => requireAuth(() => setState("assess")), [requireAuth])
 
   const launchAnalysis = useCallback(async (file: File, goal: string | null) => {
@@ -106,7 +103,6 @@ export default function Home() {
   const reset = useCallback(() => {
     abortRef.current?.abort()
     setState("landing")
-    setCaptureInputs(null)
     setVideoFile(null)
     setResults(null)
     setAnalyzeError(null)
@@ -122,7 +118,7 @@ export default function Home() {
       const runRes = await fetch("/api/runs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ goal: captureInputs?.goal ?? null, urlA: captureInputs?.url ?? null }),
+        body: JSON.stringify({ goal: null, urlA: null }),
       })
       if (!runRes.ok) {
         const err = await runRes.json().catch(() => ({}))
@@ -148,7 +144,7 @@ export default function Home() {
       console.error("[handleSave]", err)
       throw err
     }
-  }, [results, captureInputs, user])
+  }, [results, user])
 
   const handleSaveOrReturn = useCallback(async (): Promise<string> => {
     if (savedRunId) return savedRunId
@@ -156,29 +152,19 @@ export default function Home() {
   }, [savedRunId, handleSave])
 
   return (
-    <main style={{ background: "#0B0F14", minHeight: "100vh" }}>
+    <main style={{ background: "#000000", minHeight: "100vh" }}>
       <AnimatePresence mode="wait">
         {state === "landing" && (
           <motion.div key="landing" variants={pageVariants} initial="initial" animate="animate" exit="exit" transition={pageTransition}>
-            <Landing onCaptureAndAssess={goCapture} onSkipToAssess={goAssess} />
-          </motion.div>
-        )}
-
-        {state === "capture" && (
-          <motion.div key="capture" variants={pageVariants} initial="initial" animate="animate" exit="exit" transition={pageTransition}>
-            <CaptureView
-              onContinue={(inputs) => { setCaptureInputs(inputs); goAssess() }}
-              onBack={() => setState("landing")}
-            />
+            <Landing onSkipToAssess={goAssess} />
           </motion.div>
         )}
 
         {state === "assess" && (
           <motion.div key="assess" variants={pageVariants} initial="initial" animate="animate" exit="exit" transition={pageTransition}>
             <AssessView
-              captureInputs={captureInputs}
-              onAnalyze={(file) => launchAnalysis(file, captureInputs?.goal ?? null)}
-              onBack={() => setState(captureInputs ? "capture" : "landing")}
+              onAnalyze={(file) => launchAnalysis(file, null)}
+              onBack={() => setState("landing")}
             />
           </motion.div>
         )}
@@ -188,7 +174,7 @@ export default function Home() {
             <AnalyzingView
               onComplete={handleAnalyzeProgressComplete}
               error={analyzeError}
-              onRetry={() => videoFile && launchAnalysis(videoFile, captureInputs?.goal ?? null)}
+              onRetry={() => videoFile && launchAnalysis(videoFile, null)}
               onCancel={reset}
               isResolved={results !== null}
             />

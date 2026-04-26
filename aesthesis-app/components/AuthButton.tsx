@@ -19,11 +19,11 @@ export default function AuthButton() {
         href="/api/auth/login"
         className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium"
         style={{
-          background: "rgba(124,156,255,0.1)",
-          border: "1px solid rgba(124,156,255,0.25)",
-          color: "#7C9CFF",
+          background: "rgba(224,69,77,0.1)",
+          border: "1px solid rgba(224,69,77,0.25)",
+          color: "#E0454D",
         }}
-        whileHover={{ scale: 1.03, boxShadow: "0 0 16px rgba(124,156,255,0.15)" }}
+        whileHover={{ scale: 1.03, boxShadow: "0 0 16px rgba(224,69,77,0.15)" }}
         whileTap={{ scale: 0.97 }}
       >
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -43,7 +43,7 @@ export default function AuthButton() {
           <img src={user.picture} alt="" className="w-4 h-4 rounded-full" />
         ) : (
           <div className="w-4 h-4 rounded-full flex items-center justify-center text-[8px] font-bold"
-            style={{ background: "rgba(124,156,255,0.3)", color: "#7C9CFF" }}>
+            style={{ background: "rgba(224,69,77,0.3)", color: "#E0454D" }}>
             {(user.name ?? user.email ?? "?")[0].toUpperCase()}
           </div>
         )}

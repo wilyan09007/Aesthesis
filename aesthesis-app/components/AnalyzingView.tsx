@@ -44,7 +44,7 @@ export default function AnalyzingView({
     return (
       <div
         className="min-h-screen flex flex-col items-center justify-center px-8"
-        style={{ background: "#0a0a0f" }}
+        style={{ background: "#000000" }}
       >
         <motion.div
           className="text-center mb-12"
@@ -91,9 +91,9 @@ export default function AnalyzingView({
                 onClick={onRetry}
                 className="px-4 py-2 rounded-lg text-xs font-medium transition-all"
                 style={{
-                  background: "rgba(139,92,246,0.15)",
-                  border: "1px solid rgba(139,92,246,0.3)",
-                  color: "#a78bfa",
+                  background: "rgba(224,69,77,0.12)",
+                  border: "1px solid rgba(224,69,77,0.3)",
+                  color: "#E0454D",
                   cursor: "pointer",
                 }}
               >

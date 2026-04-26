@@ -10,7 +10,6 @@ import AuthButton from "./AuthButton"
 const BrainHero = lazy(() => import("./BrainHero"))
 
 interface LandingProps {
-  onCaptureAndAssess: () => void
   onSkipToAssess: () => void
 }
 
@@ -54,41 +53,19 @@ const STEPS = [
   { n: "04", title: "Read", body: "Timestamped insights, neural metrics, and an overall assessment." },
 ]
 
-export default function Landing({ onCaptureAndAssess, onSkipToAssess }: LandingProps) {
+export default function Landing({ onSkipToAssess }: LandingProps) {
   return (
     <div className="relative min-h-screen overflow-x-hidden" style={{
       backgroundImage: "radial-gradient(rgba(255,255,255,0.028) 1px, transparent 1px)",
       backgroundSize: "44px 44px",
     }}>
-      {/* Ambient blobs */}
-      <div className="absolute inset-0 pointer-events-none overflow-hidden">
-        <motion.div
-          className="absolute w-[700px] h-[700px] rounded-full"
-          style={{
-            top: "-15%", right: "-10%",
-            background: "radial-gradient(circle, rgba(124,156,255,0.07) 0%, transparent 65%)",
-          }}
-          animate={{ scale: [1, 1.06, 0.97, 1] }}
-          transition={{ duration: 20, repeat: Infinity, ease: "easeInOut" }}
-        />
-        <motion.div
-          className="absolute w-[500px] h-[500px] rounded-full"
-          style={{
-            bottom: "10%", left: "-8%",
-            background: "radial-gradient(circle, rgba(92,242,197,0.05) 0%, transparent 65%)",
-          }}
-          animate={{ scale: [1, 0.95, 1.04, 1], x: [0, 20, -10, 0] }}
-          transition={{ duration: 25, repeat: Infinity, ease: "easeInOut", delay: 5 }}
-        />
-      </div>
-
       {/* Nav bar */}
       <nav className="relative z-20 flex items-center justify-between px-10 py-5"
         style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
         <div className="flex items-center gap-2.5">
           <div className="w-6 h-6 rounded-full flex items-center justify-center"
-            style={{ background: "rgba(124,156,255,0.15)", border: "1px solid rgba(124,156,255,0.3)" }}>
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#7C9CFF" strokeWidth="1.5">
+            style={{ background: "rgba(224,69,77,0.15)", border: "1px solid rgba(224,69,77,0.3)" }}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#E0454D" strokeWidth="1.5">
               <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
             </svg>
           </div>
@@ -114,22 +91,15 @@ export default function Landing({ onCaptureAndAssess, onSkipToAssess }: LandingP
             transition={{ duration: 0.7 }}
           >
             <div className="inline-flex items-center gap-2 mb-7 px-3 py-1 rounded-full text-[11px] tracking-widest uppercase"
-              style={{ background: "rgba(124,156,255,0.08)", border: "1px solid rgba(124,156,255,0.2)", color: "#7C9CFF" }}>
-              <span className="w-1 h-1 rounded-full inline-block" style={{ background: "#7C9CFF" }} />
+              style={{ background: "rgba(224,69,77,0.08)", border: "1px solid rgba(224,69,77,0.2)", color: "#E0454D" }}>
+              <span className="w-1 h-1 rounded-full inline-block" style={{ background: "#E0454D" }} />
               Neural UX intelligence
             </div>
 
             <h1 className="font-light leading-[1.08] tracking-tight mb-6"
               style={{ fontSize: "clamp(3rem, 5vw, 4.25rem)", color: "#e8eaf0" }}>
               Demo anything.<br />
-              <span style={{
-                background: "linear-gradient(135deg, #7C9CFF 0%, #5CF2C5 100%)",
-                WebkitBackgroundClip: "text",
-                WebkitTextFillColor: "transparent",
-                backgroundClip: "text",
-              }}>
-                See the analysis.
-              </span>
+              <span style={{ color: "#E0454D" }}>See the analysis.</span>
             </h1>
 
             <p className="text-base leading-relaxed max-w-md" style={{ color: "rgba(255,255,255,0.52)" }}>
@@ -147,7 +117,7 @@ export default function Landing({ onCaptureAndAssess, onSkipToAssess }: LandingP
             {FEATURES.map((f) => (
               <div key={f.title} className="flex items-start gap-3">
                 <div className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0 mt-0.5"
-                  style={{ background: "rgba(124,156,255,0.1)", color: "#7C9CFF" }}>
+                  style={{ background: "rgba(224,69,77,0.1)", color: "#E0454D" }}>
                   {f.icon}
                 </div>
                 <div>
@@ -166,35 +136,17 @@ export default function Landing({ onCaptureAndAssess, onSkipToAssess }: LandingP
             transition={{ duration: 0.7, delay: 0.28 }}
           >
             <motion.button
-              onClick={onCaptureAndAssess}
-              className="flex items-center gap-2.5 px-5 py-3 rounded-xl text-sm font-medium"
-              style={{
-                background: "linear-gradient(135deg, rgba(124,156,255,0.2), rgba(92,242,197,0.12))",
-                border: "1px solid rgba(124,156,255,0.3)",
-                color: "#e8eaf0",
-              }}
-              whileHover={{ scale: 1.03, boxShadow: "0 0 28px rgba(124,156,255,0.2)" }}
-              whileTap={{ scale: 0.98 }}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#7C9CFF" strokeWidth="2">
-                <circle cx="12" cy="12" r="3" />
-                <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" />
-              </svg>
-              Capture &amp; Assess
-            </motion.button>
-
-            <motion.button
               onClick={onSkipToAssess}
               className="flex items-center gap-2.5 px-5 py-3 rounded-xl text-sm font-medium"
               style={{
-                background: "rgba(255,255,255,0.04)",
-                border: "1px solid rgba(255,255,255,0.1)",
-                color: "rgba(255,255,255,0.65)",
+                background: "rgba(224,69,77,0.18)",
+                border: "1px solid rgba(224,69,77,0.3)",
+                color: "#e8eaf0",
               }}
-              whileHover={{ scale: 1.03, borderColor: "rgba(92,242,197,0.35)", color: "#5CF2C5" }}
+              whileHover={{ scale: 1.03, boxShadow: "0 0 28px rgba(224,69,77,0.2)" }}
               whileTap={{ scale: 0.98 }}
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#E0454D" strokeWidth="2">
                 <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
                 <polyline points="17 8 12 3 7 8" />
                 <line x1="12" y1="3" x2="12" y2="15" />
@@ -206,20 +158,14 @@ export default function Landing({ onCaptureAndAssess, onSkipToAssess }: LandingP
 
         {/* Right: Brain3D hero */}
         <div className="relative flex items-center justify-center h-full">
-          {/* Glow behind brain */}
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-            <div className="w-[600px] h-[600px] rounded-full"
-              style={{ background: "radial-gradient(circle, rgba(124,156,255,0.1) 0%, rgba(92,242,197,0.04) 45%, transparent 70%)", filter: "blur(8px)" }} />
-          </div>
-
           {/* Decorative rings */}
           <motion.div className="absolute w-[660px] h-[660px] rounded-full"
-            style={{ border: "1px solid rgba(124,156,255,0.08)" }}
+            style={{ border: "1px solid rgba(224,69,77,0.08)" }}
             animate={{ rotate: 360 }}
             transition={{ duration: 90, repeat: Infinity, ease: "linear" }}
           />
           <motion.div className="absolute w-[490px] h-[490px] rounded-full"
-            style={{ border: "1px solid rgba(92,242,197,0.06)" }}
+            style={{ border: "1px solid rgba(224,69,77,0.06)" }}
             animate={{ rotate: -360 }}
             transition={{ duration: 60, repeat: Infinity, ease: "linear" }}
           />
@@ -242,9 +188,9 @@ export default function Landing({ onCaptureAndAssess, onSkipToAssess }: LandingP
             className="absolute text-[10px] font-mono px-2 py-1 rounded-lg"
             style={{
               top: "22%", right: "10%",
-              background: "rgba(124,156,255,0.12)",
-              border: "1px solid rgba(124,156,255,0.25)",
-              color: "#7C9CFF",
+              background: "rgba(224,69,77,0.12)",
+              border: "1px solid rgba(224,69,77,0.25)",
+              color: "#E0454D",
             }}
             animate={{ y: [0, -6, 0] }}
             transition={{ duration: 4, repeat: Infinity, ease: "easeInOut" }}
@@ -255,9 +201,10 @@ export default function Landing({ onCaptureAndAssess, onSkipToAssess }: LandingP
             className="absolute text-[10px] font-mono px-2 py-1 rounded-lg"
             style={{
               bottom: "26%", left: "8%",
-              background: "rgba(255,107,107,0.1)",
-              border: "1px solid rgba(255,107,107,0.22)",
-              color: "#FF6B6B",
+              background: "rgba(139,92,246,0.12)",
+              border: "1px solid rgba(167,139,250,0.32)",
+              color: "#a78bfa",
+              boxShadow: "0 0 22px rgba(139,92,246,0.32), 0 0 48px rgba(139,92,246,0.14)",
             }}
             animate={{ y: [0, 6, 0] }}
             transition={{ duration: 5, repeat: Infinity, ease: "easeInOut", delay: 1.5 }}
@@ -268,9 +215,9 @@ export default function Landing({ onCaptureAndAssess, onSkipToAssess }: LandingP
             className="absolute text-[10px] font-mono px-2 py-1 rounded-lg"
             style={{
               top: "60%", right: "6%",
-              background: "rgba(92,242,197,0.1)",
-              border: "1px solid rgba(92,242,197,0.22)",
-              color: "#5CF2C5",
+              background: "rgba(224,69,77,0.1)",
+              border: "1px solid rgba(224,69,77,0.22)",
+              color: "#E0454D",
             }}
             animate={{ y: [0, -4, 0] }}
             transition={{ duration: 3.5, repeat: Infinity, ease: "easeInOut", delay: 0.8 }}
@@ -298,9 +245,9 @@ export default function Landing({ onCaptureAndAssess, onSkipToAssess }: LandingP
               <div key={step.n} className="flex items-start flex-1">
                 <div className="flex flex-col gap-3 flex-1">
                   <div className="flex items-center gap-3">
-                    <span className="text-xs font-mono" style={{ color: "rgba(124,156,255,0.5)" }}>{step.n}</span>
+                    <span className="text-xs font-mono" style={{ color: "rgba(224,69,77,0.5)" }}>{step.n}</span>
                     {i < STEPS.length - 1 && (
-                      <div className="flex-1 h-px" style={{ background: "linear-gradient(90deg, rgba(255,255,255,0.08), transparent)" }} />
+                      <div className="flex-1 h-px" style={{ background: "rgba(255,255,255,0.08)" }} />
                     )}
                   </div>
                   <div className="pr-8">
@@ -314,37 +261,21 @@ export default function Landing({ onCaptureAndAssess, onSkipToAssess }: LandingP
         </motion.div>
       </section>
 
-      {/* ── ACTION CARDS ─────────────────────────────────────────── */}
-      <section className="relative z-10 px-14 pb-24 max-w-3xl mx-auto">
+      {/* ── ACTION CARD ──────────────────────────────────────────── */}
+      <section className="relative z-10 px-14 pb-24 max-w-xl mx-auto">
         <motion.div
-          className="flex gap-5"
           initial={{ opacity: 0, y: 20 }}
           whileInView={{ opacity: 1, y: 0 }}
           viewport={{ once: true }}
           transition={{ duration: 0.7 }}
         >
           <LandingCard
-            label="Capture &amp; Assess"
-            description="Enter a URL. We autonomously demo the experience and record the session for analysis."
-            badge="Full pipeline"
-            badgeColor="#7C9CFF"
-            glowColor="rgba(124,156,255,0.12)"
-            borderHoverColor="rgba(124,156,255,0.35)"
-            onClick={onCaptureAndAssess}
-            icon={
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                <circle cx="12" cy="12" r="3" />
-                <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" />
-              </svg>
-            }
-          />
-          <LandingCard
-            label="Skip to Assess"
-            description="Already have an MP4 recording? Upload it directly and get instant neural analysis."
+            label="Upload your demo"
+            description="Drop an MP4 recording of any product flow and get instant neural analysis."
             badge="Upload path"
-            badgeColor="#5CF2C5"
-            glowColor="rgba(92,242,197,0.10)"
-            borderHoverColor="rgba(92,242,197,0.30)"
+            badgeColor="#E0454D"
+            glowColor="rgba(224,69,77,0.12)"
+            borderHoverColor="rgba(224,69,77,0.35)"
             onClick={onSkipToAssess}
             icon={
               <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -365,7 +296,7 @@ function BrainFallback() {
     <div className="flex items-center justify-center" style={{ width: 540, height: 540 }}>
       <motion.div
         className="w-20 h-20 rounded-full"
-        style={{ border: "2px solid rgba(124,156,255,0.2)", borderTopColor: "#7C9CFF" }}
+        style={{ border: "2px solid rgba(224,69,77,0.2)", borderTopColor: "#E0454D" }}
         animate={{ rotate: 360 }}
         transition={{ duration: 1.5, repeat: Infinity, ease: "linear" }}
       />

@@ -3,10 +3,10 @@
 import { motion } from "framer-motion"
 
 const COLORS = {
-  bg: "#0a0a0f",
-  primary: "#8b5cf6",   // violet-500
-  secondary: "#a78bfa", // violet-400
-  tertiary: "#c4b5fd",  // violet-300
+  bg: "#000000",
+  primary: "#E0454D",
+  secondary: "#FF7A82",
+  tertiary: "#FFC2C7",
 }
 
 // 16 nodes arranged in a brain-like silhouette, layered top-to-bottom.

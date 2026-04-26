@@ -75,13 +75,13 @@ export default function ResultsView({ data, videoFile, onReset, savedRunId, save
         style={{ borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
         <div className="flex items-center gap-3">
           <div className="w-7 h-7 rounded-full flex items-center justify-center"
-            style={{ background: "rgba(124,156,255,0.1)", border: "1px solid rgba(124,156,255,0.2)" }}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#7C9CFF" strokeWidth="1.5">
+            style={{ background: "rgba(224,69,77,0.1)", border: "1px solid rgba(224,69,77,0.2)" }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#E0454D" strokeWidth="1.5">
               <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
             </svg>
           </div>
           <span className="text-sm font-medium" style={{ color: "#e8eaf0" }}>Aesthesis</span>
-          <span className="text-xs px-2 py-0.5 rounded" style={{ background: "rgba(92,242,197,0.1)", color: "#5CF2C5", border: "1px solid rgba(92,242,197,0.2)" }}>
+          <span className="text-xs px-2 py-0.5 rounded" style={{ background: "rgba(224,69,77,0.1)", color: "#E0454D", border: "1px solid rgba(224,69,77,0.2)" }}>
             Results
           </span>
         </div>
@@ -92,11 +92,11 @@ export default function ResultsView({ data, videoFile, onReset, savedRunId, save
               onClick={onAgentOpen}
               className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all"
               style={{
-                background: "rgba(124,156,255,0.1)",
-                border: "1px solid rgba(124,156,255,0.25)",
-                color: "#7C9CFF",
+                background: "rgba(224,69,77,0.1)",
+                border: "1px solid rgba(224,69,77,0.25)",
+                color: "#E0454D",
               }}
-              onMouseEnter={e => (e.currentTarget.style.boxShadow = "0 0 16px rgba(124,156,255,0.15)")}
+              onMouseEnter={e => (e.currentTarget.style.boxShadow = "0 0 16px rgba(224,69,77,0.15)")}
               onMouseLeave={e => (e.currentTarget.style.boxShadow = "none")}
             >
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -129,17 +129,13 @@ export default function ResultsView({ data, videoFile, onReset, savedRunId, save
               disabled={saveStatus === "saving" || saveStatus === "saved"}
               className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all"
               style={{
-                background: saveStatus === "saved"
-                  ? "rgba(92,242,197,0.1)"
-                  : "rgba(124,156,255,0.1)",
-                border: `1px solid ${saveStatus === "saved" ? "rgba(92,242,197,0.25)" : "rgba(124,156,255,0.25)"}`,
-                color: saveStatus === "saved"
-                  ? "#5CF2C5"
-                  : saveStatus === "error"
-                    ? "#FF6B6B"
-                    : saveStatus === "saving"
-                      ? "rgba(255,255,255,0.4)"
-                      : "#7C9CFF",
+                background: "rgba(224,69,77,0.1)",
+                border: "1px solid rgba(224,69,77,0.25)",
+                color: saveStatus === "error"
+                  ? "#FF6B6B"
+                  : saveStatus === "saving"
+                    ? "rgba(255,255,255,0.4)"
+                    : "#E0454D",
                 cursor: saveStatus === "saving" || saveStatus === "saved" ? "default" : "pointer",
               }}
             >
@@ -201,7 +197,7 @@ export default function ResultsView({ data, videoFile, onReset, savedRunId, save
                 className="flex items-center gap-2 px-4 py-3 shrink-0"
                 style={{ borderBottom: "1px solid rgba(255,255,255,0.06)" }}
               >
-                <div className="w-2 h-2 rounded-full" style={{ background: "#5CF2C5" }} />
+                <div className="w-2 h-2 rounded-full" style={{ background: "#E0454D" }} />
                 <span className="text-sm font-medium" style={{ color: "#e8eaf0" }}>
                   Neural state
                 </span>
@@ -258,29 +254,55 @@ export default function ResultsView({ data, videoFile, onReset, savedRunId, save
             {/* Insight cards — 2 cols */}
             <div className="col-span-2 panel rounded-2xl p-5 flex flex-col gap-4">
               <div className="flex items-center gap-2">
-                <div className="w-2 h-2 rounded-full" style={{ background: "#7C9CFF" }} />
+                <div className="w-2 h-2 rounded-full" style={{ background: "#E0454D" }} />
                 <h3 className="text-sm font-medium" style={{ color: "#e8eaf0" }}>Timestamped insights</h3>
                 <span className="ml-auto text-[10px] tracking-wide" style={{ color: "rgba(255,255,255,0.3)" }}>
                   {insights.length} moment{insights.length === 1 ? "" : "s"}
                 </span>
               </div>
-              <div className="grid grid-cols-2 gap-3 items-start">
-                {insights.map((insight, i) => (
-                  <InsightCard
-                    key={i}
-                    insight={insight}
-                    index={i}
-                    onSeek={handleSeek}
-                    runId={savedRunId ?? null}
-                    goal={data.raw.meta.goal}
-                  />
-                ))}
-                {insights.length === 0 && (
-                  <p className="text-xs col-span-2" style={{ color: "rgba(255,255,255,0.35)" }}>
-                    No notable moments detected. The demo may be too short or too uniform.
-                  </p>
-                )}
-              </div>
+              {/* Two independent vertical columns. Even-indexed insights
+                  go left, odd-indexed go right. Each column flexes
+                  independently, so an expanded card only pushes items
+                  below it in the same column — without disturbing the
+                  natural left-right-left-right reading order. */}
+              {insights.length === 0 ? (
+                <p className="text-xs" style={{ color: "rgba(255,255,255,0.35)" }}>
+                  No notable moments detected. The demo may be too short or too uniform.
+                </p>
+              ) : (
+                <div className="grid grid-cols-2 gap-3 items-start">
+                  <div className="flex flex-col gap-3">
+                    {insights.filter((_, i) => i % 2 === 0).map((insight, i) => {
+                      const realIndex = i * 2
+                      return (
+                        <InsightCard
+                          key={realIndex}
+                          insight={insight}
+                          index={realIndex}
+                          onSeek={handleSeek}
+                          runId={savedRunId ?? null}
+                          goal={data.raw.meta.goal}
+                        />
+                      )
+                    })}
+                  </div>
+                  <div className="flex flex-col gap-3">
+                    {insights.filter((_, i) => i % 2 === 1).map((insight, i) => {
+                      const realIndex = i * 2 + 1
+                      return (
+                        <InsightCard
+                          key={realIndex}
+                          insight={insight}
+                          index={realIndex}
+                          onSeek={handleSeek}
+                          runId={savedRunId ?? null}
+                          goal={data.raw.meta.goal}
+                        />
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Assessment panel — 1 col */}
@@ -304,9 +326,8 @@ function BrainFallback() {
         style={{
           width: "60%",
           aspectRatio: "1 / 1",
-          background:
-            "radial-gradient(circle at 35% 35%, rgba(124,156,255,0.18), rgba(124,156,255,0.04) 60%, transparent 75%)",
-          border: "1px solid rgba(124,156,255,0.12)",
+          background: "rgba(224,69,77,0.08)",
+          border: "1px solid rgba(224,69,77,0.2)",
         }}
         animate={{ opacity: [0.5, 0.85, 0.5] }}
         transition={{ duration: 2.4, repeat: Infinity, ease: "easeInOut" }}

@@ -7,7 +7,7 @@ interface OverallAssessmentPanelProps {
   assessment: OverallAssessment
 }
 
-const ACCENT = "#7C9CFF"
+const ACCENT = "#E0454D"
 
 export default function OverallAssessmentPanel({ assessment }: OverallAssessmentPanelProps) {
   return (
@@ -16,14 +16,8 @@ export default function OverallAssessmentPanel({ assessment }: OverallAssessment
       initial={{ opacity: 0, y: 24 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: 0.2 }}
-      style={{ border: "1px solid rgba(124,156,255,0.25)" }}
+      style={{ border: "1px solid rgba(224,69,77,0.25)" }}
     >
-      {/* Background glow */}
-      <div
-        className="absolute inset-0 pointer-events-none"
-        style={{ background: `radial-gradient(ellipse at 50% 0%, rgba(124,156,255,0.12) 0%, transparent 65%)` }}
-      />
-
       <div className="relative z-10 flex flex-col gap-5">
         {/* Header */}
         <div className="flex items-center gap-3">
@@ -56,7 +50,7 @@ export default function OverallAssessmentPanel({ assessment }: OverallAssessment
         </div>
 
         {/* Divider */}
-        <div style={{ height: "1px", background: `linear-gradient(90deg, ${ACCENT}30, transparent)` }} />
+        <div style={{ height: "1px", background: "rgba(255,255,255,0.08)" }} />
 
         {/* Summary */}
         <motion.p
@@ -74,7 +68,7 @@ export default function OverallAssessmentPanel({ assessment }: OverallAssessment
           <Bullets
             title="Strengths"
             items={assessment.top_strengths}
-            color="#5CF2C5"
+            color="#E0454D"
           />
           <Bullets
             title="Concerns"

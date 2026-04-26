@@ -12,8 +12,9 @@ interface InsightCardProps {
   goal?: string | null
 }
 
-const ACCENT = "#7C9CFF"
+const ACCENT = "#E0454D"
 const VIOLET = "#a78bfa"
+const VIOLET_GLOW = "0 0 22px rgba(139,92,246,0.32), 0 0 48px rgba(139,92,246,0.14)"
 
 export default function InsightCard({ insight, index, onSeek, runId, goal }: InsightCardProps) {
   const [t0, t1] = insight.timestamp_range_s
@@ -127,9 +128,9 @@ export default function InsightCard({ insight, index, onSeek, runId, goal }: Ins
               <div className="flex items-start gap-2 mb-3">
                 <div
                   className="w-3.5 h-3.5 rounded-full flex items-center justify-center shrink-0 mt-0.5"
-                  style={{ background: `${ACCENT}15` }}
+                  style={{ background: `${VIOLET}22`, boxShadow: VIOLET_GLOW }}
                 >
-                  <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke={ACCENT} strokeWidth="2.5">
+                  <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke={VIOLET} strokeWidth="2.5">
                     <path d="M5 12h14" />
                     <path d="M12 5l7 7-7 7" />
                   </svg>
@@ -138,7 +139,7 @@ export default function InsightCard({ insight, index, onSeek, runId, goal }: Ins
                   <p className="text-[10px] uppercase tracking-widest mb-1" style={{ color: "rgba(255,255,255,0.35)" }}>
                     Initial recommendation
                   </p>
-                  <p className="text-xs leading-relaxed" style={{ color: ACCENT, opacity: 0.85 }}>
+                  <p className="text-xs leading-relaxed" style={{ color: VIOLET, opacity: 0.92 }}>
                     {insight.recommendation}
                   </p>
                 </div>
@@ -171,9 +172,10 @@ export default function InsightCard({ insight, index, onSeek, runId, goal }: Ins
                     onClick={fetchSuggestion}
                     className="w-full px-3 py-2 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition-all hover:brightness-125"
                     style={{
-                      background: `${VIOLET}15`,
-                      border: `1px solid ${VIOLET}40`,
+                      background: `${VIOLET}1f`,
+                      border: `1px solid ${VIOLET}50`,
                       color: VIOLET,
+                      boxShadow: VIOLET_GLOW,
                     }}
                   >
                     <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">

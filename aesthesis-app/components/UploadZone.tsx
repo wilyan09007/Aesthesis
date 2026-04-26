@@ -8,7 +8,7 @@ interface UploadZoneProps {
   onFile: (file: File | null) => void
 }
 
-const ACCENT = "#7C9CFF"
+const ACCENT = "#E0454D"
 
 export default function UploadZone({ file, onFile }: UploadZoneProps) {
   const inputRef = useRef<HTMLInputElement>(null)

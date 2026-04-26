@@ -14,9 +14,9 @@ interface ComparePanelProps {
 function WinnerBadge({ winner }: { winner: string }) {
   const cfg =
     winner === "A"
-      ? { color: "#7C9CFF", bg: "rgba(124,156,255,0.15)", label: "Version A" }
+      ? { color: "#E0454D", bg: "rgba(224,69,77,0.15)", label: "Version A" }
       : winner === "B"
-        ? { color: "#5CF2C5", bg: "rgba(92,242,197,0.12)", label: "Version B" }
+        ? { color: "#E0454D", bg: "rgba(224,69,77,0.12)", label: "Version B" }
         : { color: "#FBBF24", bg: "rgba(251,191,36,0.1)", label: "Tie" }
 
   return (
@@ -82,7 +82,7 @@ export default function ComparePanel({ currentRunId, pastRunId, onClose }: Compa
       >
         <motion.div
           className="relative w-full max-w-2xl rounded-2xl overflow-hidden"
-          style={{ background: "rgba(11,15,20,0.99)", border: "1px solid rgba(255,255,255,0.1)", maxHeight: "85vh", overflowY: "auto" }}
+          style={{ background: "rgba(0,0,0,0.99)", border: "1px solid rgba(255,255,255,0.1)", maxHeight: "85vh", overflowY: "auto" }}
           initial={{ opacity: 0, scale: 0.95, y: 16 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
           exit={{ opacity: 0, scale: 0.95 }}
@@ -113,7 +113,7 @@ export default function ComparePanel({ currentRunId, pastRunId, onClose }: Compa
             {loading && (
               <div className="flex items-center justify-center h-40">
                 <motion.div className="w-8 h-8 rounded-full"
-                  style={{ border: "2px solid rgba(124,156,255,0.3)", borderTopColor: "#7C9CFF" }}
+                  style={{ border: "2px solid rgba(224,69,77,0.3)", borderTopColor: "#E0454D" }}
                   animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: "linear" }} />
               </div>
             )}
@@ -133,8 +133,8 @@ export default function ComparePanel({ currentRunId, pastRunId, onClose }: Compa
                     return (
                       <div key={which} className="rounded-xl p-4"
                         style={{
-                          background: which === "current" ? "rgba(124,156,255,0.05)" : "rgba(255,255,255,0.02)",
-                          border: `1px solid ${which === "current" ? "rgba(124,156,255,0.15)" : "rgba(255,255,255,0.06)"}`,
+                          background: which === "current" ? "rgba(224,69,77,0.05)" : "rgba(255,255,255,0.02)",
+                          border: `1px solid ${which === "current" ? "rgba(224,69,77,0.15)" : "rgba(255,255,255,0.06)"}`,
                         }}>
                         <div className="flex items-center justify-between mb-2">
                           <span className="text-[10px] uppercase tracking-widest"
@@ -175,11 +175,11 @@ export default function ComparePanel({ currentRunId, pastRunId, onClose }: Compa
                         </div>
                         <div className="flex flex-col gap-1.5">
                           <div className="flex items-center gap-2">
-                            <span className="text-[10px] w-3" style={{ color: "#7C9CFF" }}>A</span>
+                            <span className="text-[10px] w-3" style={{ color: "#E0454D" }}>A</span>
                             <DeltaBar value={a} color={ROI_COLORS[key]} />
                           </div>
                           <div className="flex items-center gap-2">
-                            <span className="text-[10px] w-3" style={{ color: "#5CF2C5" }}>B</span>
+                            <span className="text-[10px] w-3" style={{ color: "#E0454D" }}>B</span>
                             <DeltaBar value={b} color={ROI_COLORS[key]} />
                           </div>
                         </div>

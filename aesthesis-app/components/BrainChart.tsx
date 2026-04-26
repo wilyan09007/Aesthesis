@@ -48,7 +48,7 @@ function buildChartData(frames: Frame[]): ChartDataPoint[] {
   })
 }
 
-const ACCENT = "#7C9CFF"
+const ACCENT = "#E0454D"
 
 const ROITooltip = ({ active, payload, label }: {
   active?: boolean
@@ -58,7 +58,7 @@ const ROITooltip = ({ active, payload, label }: {
   if (!active || !payload?.length) return null
   return (
     <div className="p-3 rounded-xl text-xs"
-      style={{ background: "rgba(11,15,20,0.95)", border: "1px solid rgba(255,255,255,0.1)", backdropFilter: "blur(12px)", minWidth: 200 }}>
+      style={{ background: "rgba(0,0,0,0.95)", border: "1px solid rgba(255,255,255,0.1)", backdropFilter: "blur(12px)", minWidth: 200 }}>
       <p className="font-mono mb-2" style={{ color: "rgba(255,255,255,0.5)" }}>{label?.toFixed(1)}s</p>
       <div className="flex flex-col gap-1">
         {payload.slice(0, 8).map((entry) => (
@@ -99,7 +99,7 @@ function InsightPopover({ insight, containerWidth, maxTime, onSeek }: {
       <div
         className="rounded-xl p-4 text-xs"
         style={{
-          background: "rgba(9,12,18,0.98)",
+          background: "rgba(0,0,0,0.98)",
           border: `1px solid ${ACCENT}40`,
           backdropFilter: "blur(20px)",
           boxShadow: `0 12px 40px rgba(0,0,0,0.6), 0 0 0 1px ${ACCENT}10`,
@@ -265,8 +265,8 @@ export default function BrainChart({ frames, insights, currentTime, onSeek, dura
                   key={`ins_${i}`}
                   x1={insight.timestamp_range_s[0]}
                   x2={insight.timestamp_range_s[1]}
-                  fill={isActive ? "rgba(124,156,255,0.2)" : "rgba(124,156,255,0.07)"}
-                  stroke="rgba(124,156,255,0.25)"
+                  fill={isActive ? "rgba(224,69,77,0.2)" : "rgba(224,69,77,0.07)"}
+                  stroke="rgba(224,69,77,0.25)"
                   strokeWidth={isActive ? 1 : 0}
                   strokeDasharray="2 2"
                   ifOverflow="hidden"

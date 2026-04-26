@@ -23,8 +23,8 @@ function relativeTime(iso: string): string {
 }
 
 const WINNER_STYLE = {
-  A: { color: "#7C9CFF", bg: "rgba(124,156,255,0.12)" },
-  B: { color: "#5CF2C5", bg: "rgba(92,242,197,0.10)" },
+  A: { color: "#E0454D", bg: "rgba(224,69,77,0.12)" },
+  B: { color: "#E0454D", bg: "rgba(224,69,77,0.10)" },
   tie: { color: "#FBBF24", bg: "rgba(251,191,36,0.10)" },
 }
 
@@ -72,7 +72,7 @@ export default function HistoryPanel({ open, onClose, savedRunId, onSaveFirst, o
             className="fixed right-0 top-0 bottom-0 z-50 flex flex-col"
             style={{
               width: 400,
-              background: "rgba(11,15,20,0.98)",
+              background: "rgba(0,0,0,0.98)",
               borderLeft: "1px solid rgba(255,255,255,0.08)",
               backdropFilter: "blur(24px)",
             }}
@@ -132,8 +132,8 @@ export default function HistoryPanel({ open, onClose, savedRunId, onSaveFirst, o
                       <div key={run.id}
                         className="rounded-xl p-4"
                         style={{
-                          background: isCurrent ? "rgba(124,156,255,0.06)" : "rgba(255,255,255,0.03)",
-                          border: `1px solid ${isCurrent ? "rgba(124,156,255,0.2)" : "rgba(255,255,255,0.06)"}`,
+                          background: isCurrent ? "rgba(224,69,77,0.06)" : "rgba(255,255,255,0.03)",
+                          border: `1px solid ${isCurrent ? "rgba(224,69,77,0.2)" : "rgba(255,255,255,0.06)"}`,
                         }}>
                         <div className="flex items-start justify-between gap-3 mb-2">
                           <div className="flex items-center gap-2 flex-1 min-w-0">
@@ -148,7 +148,7 @@ export default function HistoryPanel({ open, onClose, savedRunId, onSaveFirst, o
                             </p>
                           </div>
                           {isCurrent && (
-                            <span className="text-[10px] shrink-0" style={{ color: "#7C9CFF" }}>current</span>
+                            <span className="text-[10px] shrink-0" style={{ color: "#E0454D" }}>current</span>
                           )}
                         </div>
 
@@ -171,9 +171,9 @@ export default function HistoryPanel({ open, onClose, savedRunId, onSaveFirst, o
                               disabled={isComparing}
                               className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium"
                               style={{
-                                background: "rgba(124,156,255,0.1)",
-                                border: "1px solid rgba(124,156,255,0.2)",
-                                color: isComparing ? "rgba(255,255,255,0.3)" : "#7C9CFF",
+                                background: "rgba(224,69,77,0.1)",
+                                border: "1px solid rgba(224,69,77,0.2)",
+                                color: isComparing ? "rgba(255,255,255,0.3)" : "#E0454D",
                               }}
                               whileHover={!isComparing ? { scale: 1.03 } : {}}
                               whileTap={!isComparing ? { scale: 0.97 } : {}}

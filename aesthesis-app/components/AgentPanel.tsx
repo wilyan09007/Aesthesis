@@ -67,10 +67,10 @@ export default function AgentPanel({ currentRunId, onClose }: AgentPanelProps) {
       style={{
         width: 420,
         height: 560,
-        background: "rgba(9,12,18,0.98)",
-        border: "1px solid rgba(124,156,255,0.2)",
+        background: "rgba(0,0,0,0.98)",
+        border: "1px solid rgba(224,69,77,0.2)",
         backdropFilter: "blur(24px)",
-        boxShadow: "0 24px 80px rgba(0,0,0,0.6), 0 0 0 1px rgba(124,156,255,0.08)",
+        boxShadow: "0 24px 80px rgba(0,0,0,0.6), 0 0 0 1px rgba(224,69,77,0.08)",
       }}
       initial={{ opacity: 0, y: 20, scale: 0.96 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -82,8 +82,8 @@ export default function AgentPanel({ currentRunId, onClose }: AgentPanelProps) {
         style={{ borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
         <div className="flex items-center gap-2.5">
           <div className="w-7 h-7 rounded-full flex items-center justify-center"
-            style={{ background: "rgba(124,156,255,0.15)", border: "1px solid rgba(124,156,255,0.3)" }}>
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#7C9CFF" strokeWidth="1.5">
+            style={{ background: "rgba(224,69,77,0.15)", border: "1px solid rgba(224,69,77,0.3)" }}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#E0454D" strokeWidth="1.5">
               <circle cx="12" cy="12" r="10" />
               <path d="M12 8v4M12 16h.01" />
             </svg>
@@ -117,7 +117,7 @@ export default function AgentPanel({ currentRunId, onClose }: AgentPanelProps) {
               <button key={s} onClick={() => send(s)}
                 className="text-left px-3 py-2.5 rounded-xl text-xs transition-all"
                 style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", color: "rgba(255,255,255,0.5)" }}
-                onMouseEnter={e => { e.currentTarget.style.borderColor = "rgba(124,156,255,0.25)"; e.currentTarget.style.color = "#7C9CFF" }}
+                onMouseEnter={e => { e.currentTarget.style.borderColor = "rgba(224,69,77,0.25)"; e.currentTarget.style.color = "#E0454D" }}
                 onMouseLeave={e => { e.currentTarget.style.borderColor = "rgba(255,255,255,0.06)"; e.currentTarget.style.color = "rgba(255,255,255,0.5)" }}
               >
                 {s}
@@ -132,7 +132,7 @@ export default function AgentPanel({ currentRunId, onClose }: AgentPanelProps) {
               className="max-w-[85%] px-3.5 py-2.5 rounded-xl text-xs leading-relaxed whitespace-pre-wrap"
               style={
                 msg.role === "user"
-                  ? { background: "rgba(124,156,255,0.15)", border: "1px solid rgba(124,156,255,0.2)", color: "#e8eaf0" }
+                  ? { background: "rgba(224,69,77,0.15)", border: "1px solid rgba(224,69,77,0.2)", color: "#e8eaf0" }
                   : { background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.07)", color: "rgba(255,255,255,0.82)" }
               }
             >
@@ -148,7 +148,7 @@ export default function AgentPanel({ currentRunId, onClose }: AgentPanelProps) {
               <div className="flex gap-1 items-center h-3">
                 {[0, 1, 2].map((i) => (
                   <motion.div key={i} className="w-1.5 h-1.5 rounded-full"
-                    style={{ background: "#7C9CFF" }}
+                    style={{ background: "#E0454D" }}
                     animate={{ opacity: [0.3, 1, 0.3] }}
                     transition={{ duration: 1, repeat: Infinity, delay: i * 0.2 }}
                   />
@@ -178,16 +178,16 @@ export default function AgentPanel({ currentRunId, onClose }: AgentPanelProps) {
             placeholder="Ask about your runs…"
             className="flex-1 px-3.5 py-2.5 rounded-xl text-xs outline-none"
             style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.08)", color: "#e8eaf0" }}
-            onFocus={e => (e.currentTarget.style.borderColor = "rgba(124,156,255,0.4)")}
+            onFocus={e => (e.currentTarget.style.borderColor = "rgba(224,69,77,0.4)")}
             onBlur={e => (e.currentTarget.style.borderColor = "rgba(255,255,255,0.08)")}
             disabled={loading}
           />
           <button type="submit" disabled={!inputValue.trim() || loading}
             className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0 transition-all"
             style={{
-              background: inputValue.trim() && !loading ? "rgba(124,156,255,0.2)" : "rgba(255,255,255,0.04)",
-              border: `1px solid ${inputValue.trim() && !loading ? "rgba(124,156,255,0.35)" : "rgba(255,255,255,0.08)"}`,
-              color: inputValue.trim() && !loading ? "#7C9CFF" : "rgba(255,255,255,0.2)",
+              background: inputValue.trim() && !loading ? "rgba(224,69,77,0.2)" : "rgba(255,255,255,0.04)",
+              border: `1px solid ${inputValue.trim() && !loading ? "rgba(224,69,77,0.35)" : "rgba(255,255,255,0.08)"}`,
+              color: inputValue.trim() && !loading ? "#E0454D" : "rgba(255,255,255,0.2)",
             }}>
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" />

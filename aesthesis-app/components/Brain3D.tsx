@@ -182,7 +182,7 @@ function BrainMesh({ roiValues }: BrainMeshProps) {
       </mesh>
 
       {/* Point light for glow */}
-      <pointLight color="#7C9CFF" intensity={1.5} distance={6} />
+      <pointLight color="#E0454D" intensity={1.5} distance={6} />
     </group>
   )
 }
@@ -206,7 +206,7 @@ export default function Brain3D({ roiValues, size }: Brain3DProps) {
             actually read as folds rather than smooth bumps. */}
         <ambientLight intensity={0.12} />
         <directionalLight position={[3, 4, 3]} intensity={0.95} color="#a0b8ff" />
-        <directionalLight position={[-3, -2, -3]} intensity={0.25} color="#5CF2C5" />
+        <directionalLight position={[-3, -2, -3]} intensity={0.25} color="#E0454D" />
         <BrainMesh roiValues={roiValues} />
         {/* Rotate is the interaction that makes the brain feel alive. Pan/zoom
             are intentionally off — they'd let the user lose the brain off-screen
