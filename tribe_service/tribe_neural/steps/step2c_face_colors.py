@@ -127,78 +127,77 @@ def _load_face_indices_cached() -> tuple[np.ndarray, np.ndarray]:
     return lh_faces, rh_faces
 
 
-# ─── Glass-brain sparse-overlay colormap (transparent + high sensitivity) ──
+# ─── White-shell + neon-red single-tail colormap (current) ─────────────────
 #
-# Two design goals (per user direction, ASSUMPTIONS_BRAIN.md §10):
+# Three design goals (per user direction, ASSUMPTIONS_BRAIN.md §9.5):
 #
 #   (A) HIGH SENSITIVITY — even small activations (|z| ≥ 0.2) produce
-#       visible color, ramping fast to saturation by |z| ≈ 1.5. Most of
-#       the cortex shows colored signal at any instant, so the user
-#       can read the spatial pattern directly.
+#       visible color, ramping fast to saturation by |z| ≈ 1.5.
 #
-#   (B) NEAR-TRANSPARENT SHELL — the resting cortex renders as a faint
-#       ghost outline (alpha ≈ 0.10), so anatomy is just suggested
-#       rather than dominant. Activated regions glow with high alpha
-#       (up to ≈ 0.92), which combined with the gray→red/blue color
-#       ramp produces a clean "glass brain with glowing patches" look.
+#   (B) NO BLUE — negative z-scores (suppression) render the same
+#       white as the resting state. The colormap is single-tail: only
+#       above-baseline activations get color. This matches the user's
+#       reading of "low activity = white".
 #
-# Output is RGBA (4 channels), unlike the prior RGB-only encoding.
-# The alpha channel is consumed by the WebGL shader (which writes it
-# into ``diffuseColor.a``) and the material is set to ``transparent =
-# true, depthWrite = false`` so per-fragment alpha controls visibility.
+#   (C) NEON ACTIVATIONS, MORE OPAQUE — saturated red ([1.0, 0.08,
+#       0.28]) at peak, base alpha 0.22 (up from 0.10) so the brain
+#       shell reads clearly even at rest.
 #
-# Wire-format change: this changes ``shape`` from (n_TRs, 20480, 3) to
-# (n_TRs, 20480, 4) and ``byteStride`` from 3 to 4. Total size grows
-# from ~737 KB/hemi to ~983 KB/hemi (still well under Meta's 1.5 MB).
+# Wire format: uint8_rgba_bin, shape (n_TRs, 20480, 4). The shader
+# writes the texture's RGBA straight into diffuseColor on a transparent
+# MeshStandardMaterial (depthWrite=false).
 
-# Resting-state base. Slightly cool gray so it reads as "ghost cortex"
-# rather than "blank slab" — keeps directional shadowing visible in the
-# faint outline.
-_GHOST_BASE = np.array([0.50, 0.50, 0.58], dtype=np.float32)
+# Resting-state base. Warm-ish white so it doesn't read as cold
+# fluorescent — has a slight cream tone that flatters the directional
+# lights without competing with the red highlight color.
+_WHITE_BASE = np.array([0.99, 0.97, 0.93], dtype=np.float32)
 
-# Saturated activation colors. More chromatic than before since the
-# transparent shell needs strong color for active regions to read.
-_COLD = np.array([0.18, 0.42, 0.96], dtype=np.float32)   # bright blue
-_WARM = np.array([0.96, 0.20, 0.18], dtype=np.float32)   # bright red
+# Peak-activation color. Vivid neon red with a faint magenta lean —
+# closer to a CSS "neon red" / "razzle-dazzle" than a muted brick red.
+# The slight blue component (0.28) keeps it from looking flat at full
+# saturation against the warm-white base.
+_NEON_RED = np.array([1.0, 0.08, 0.28], dtype=np.float32)
 
-# Sensitivity tuning. _Z_THRESH is the "barely-noticeable" floor. Below
-# this the alpha stays at _BASE_ALPHA (faint shell). Above _Z_MAX the
-# alpha and color both saturate.
+# Sensitivity tuning — unchanged from v2 of the colormap.
 _Z_THRESH = 0.2
 _Z_MAX = 1.5
 
-# Alpha curve — combined with the material's transparent flag, this
-# drives the "glass brain glowing patches" effect.
-_BASE_ALPHA = 0.10  # resting shell is ~90% transparent
-_MAX_ALPHA = 0.92   # peak activations are ~92% opaque (still slight bleed)
+# Alpha curve. Bumped from v2 (0.10 → 0.22 base, 0.92 → 0.95 peak) so
+# the brain reads more solidly. Still transparent enough that overlapping
+# faces don't pile into a flat slab.
+_BASE_ALPHA = 0.22  # resting shell ≈ 78% transparent
+_MAX_ALPHA = 0.95   # peak activations ≈ 95% opaque
 
 
 def _diverging_color_batch(z: np.ndarray) -> np.ndarray:
-    """Vectorized z-score → RGBA, glass-brain transparent-overlay style.
+    """Vectorized z-score → RGBA, single-tail white→neon-red colormap.
 
     Behaviour:
-      |z| ≤ THRESH  → ghost gray, alpha = BASE_ALPHA (faint shell)
-      THRESH < |z| < Z_MAX → linear interpolation to saturated color +
-                              high alpha
-      |z| ≥ Z_MAX   → saturated warm/cool, alpha = MAX_ALPHA
+      z ≤ 0          → pure WHITE_BASE (suppression reads as resting)
+      0 < z < THRESH → still WHITE_BASE (below sensitivity floor)
+      THRESH ≤ z ≤ Z_MAX → blend WHITE_BASE → NEON_RED, alpha grows
+      z ≥ Z_MAX      → saturated NEON_RED, alpha = MAX_ALPHA
 
-    Sign of z chooses warm (positive) vs cool (negative). Returns
-    shape ``(..., 4)`` float32 in [0, 1].
+    Alpha additionally grows with |z| (so strongly-suppressed regions
+    show a more opaque white, not invisible). The COLOR however only
+    shifts on the positive side — there's no blue.
+
+    Returns shape ``(..., 4)`` float32 in [0, 1].
     """
     z = np.where(np.isfinite(z), z, 0.0).astype(np.float32, copy=False)
     abs_z = np.abs(z)
 
-    # Color blend: ghost gray → warm/cool, linear with |z|/Z_MAX.
-    color_t = np.clip(abs_z / _Z_MAX, 0.0, 1.0)[..., None]
-    pos_mask = (z >= 0)[..., None]
-    target = np.where(pos_mask, _WARM, _COLD)
-    rgb = _GHOST_BASE + (target - _GHOST_BASE) * color_t
+    # Single-tail color blend: only positive z drives the color shift.
+    # Negative z and zero stay at WHITE_BASE — no cool/blue tint.
+    pos_t = np.clip(z / _Z_MAX, 0.0, 1.0)[..., None]
+    rgb = _WHITE_BASE + (_NEON_RED - _WHITE_BASE) * pos_t
 
-    # Alpha ramp: BASE_ALPHA below threshold, linear to MAX_ALPHA above.
+    # Alpha responds to |z| (both signs). Negative-strong regions show
+    # a slightly more opaque white; positive-strong regions show
+    # neon red at high alpha.
     span = max(1e-6, _Z_MAX - _Z_THRESH)
     a_ramp = np.clip((abs_z - _Z_THRESH) / span, 0.0, 1.0)
     alpha = _BASE_ALPHA + a_ramp * (_MAX_ALPHA - _BASE_ALPHA)
-    # Lock to BASE_ALPHA below threshold (no slow ramp from 0).
     alpha = np.where(abs_z < _Z_THRESH, _BASE_ALPHA, alpha)
 
     return np.concatenate(

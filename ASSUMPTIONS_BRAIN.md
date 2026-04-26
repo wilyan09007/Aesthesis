@@ -326,7 +326,57 @@ The bake's INFO log emits two new fields per hemisphere — `pct_alpha_gt100` an
 
 If `pct_alpha_gt200` is consistently 0, the threshold/ramp is too strict (or upstream data is flat). If `pct_alpha_gt100` is > 60 %, we're back in heatmap-blob territory and the threshold should be raised.
 
-### 9.4 Open follow-ups (deliberately not done in v2)
+### 9.4 v3 — single-tail white→neon-red (current)
+
+Pivot driven by user direction: "make blue, aka low activity, white instead, and increase opacity by a little bit, make colors more neon compared to pastel if possible."
+
+Three coupled changes:
+
+#### No blue — single-tail colormap
+
+The diverging blue↔red palette mapped low z-scores (suppression below clip-baseline) to blue. The user read this as "low activity is blue", which is technically correct but semantically confusing — they wanted "low activity reads as white/clean, not as a color." Switched to a **single-tail** map:
+
+| z-score | Color (v2) | Color (v3) |
+|---|---|---|
+| z ≤ 0 (resting / suppressed) | gray-violet → blue gradient | **pure WHITE_BASE** |
+| 0 < z < THRESH | gray-violet | WHITE_BASE |
+| THRESH ≤ z ≤ Z_MAX | gray → red blend | **WHITE_BASE → NEON_RED blend** |
+| z ≥ Z_MAX | saturated red | saturated NEON_RED |
+
+`_COLD` constant removed; `_GHOST_BASE` (gray-violet) replaced with `_WHITE_BASE` (warm white `[0.99, 0.97, 0.93]`).
+
+Note the alpha channel still responds to `|z|` (both signs), so a region with strong suppression renders as a *more opaque* white, not a colored region. This preserves the visual cue that "something is happening" without introducing a second hue.
+
+#### More opaque baseline
+
+Bumped both ends of the alpha curve:
+
+| Constant | v2 | v3 |
+|---|---|---|
+| `_BASE_ALPHA` (resting) | 0.10 | **0.22** |
+| `_MAX_ALPHA` (peak) | 0.92 | **0.95** |
+
+The brain is now ~78% transparent at rest (was 90%) — the cortical shell reads more solidly while still letting back-faces show through.
+
+#### Neon over pastel
+
+Color saturation pushed up:
+
+| Constant | v2 | v3 |
+|---|---|---|
+| Resting base RGB | `[0.50, 0.50, 0.58]` (gray-violet, pastel) | `[0.99, 0.97, 0.93]` (warm white) |
+| Peak active RGB | `[0.96, 0.20, 0.18]` (muted red) | `[1.0, 0.08, 0.28]` (vivid neon red, slight magenta lean) |
+
+The neon red has a small blue component (0.28) so it doesn't look flat against the warm-white base — gives it more of a CSS "razzle-dazzle" / neon glow feel rather than fire-engine red.
+
+#### Numbers to watch (updated)
+
+The bake's INFO log still emits `pct_alpha_gt100` and `pct_alpha_gt200`. With v3 they should look roughly:
+
+- `pct_alpha_gt100`: 70–90 % (sensitivity is unchanged so most of the cortex still shows visible activity)
+- `pct_alpha_gt200`: 50–70 % (peak activations span both signs of z; positive z shows neon red, negative z shows opaque white)
+
+### 9.5 Open follow-ups (deliberately not done yet)
 
 - **GPU upsample to fsaverage6** — Meta's `*-upsample.bin` decoded (12-byte header + per-face 3 uint32 indices + 3 uint32 weights needing runtime normalization). Their full shader has the upsample branch already extracted. Adding this gives the smooth high-res inflated view Meta's "high" toggle produces. Skipped because Meta's screenshot uses low-res pial too — visual gap was the colormap, not the mesh density.
 - **Front/back split for clean glass rendering** — single-mesh `DoubleSide + depthWrite=false` is fine for our typical viewing angles. If overlap artifacts become user-visible, split.
