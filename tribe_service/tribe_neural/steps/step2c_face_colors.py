@@ -127,29 +127,67 @@ def _load_face_indices_cached() -> tuple[np.ndarray, np.ndarray]:
     return lh_faces, rh_faces
 
 
-# ─── Diverging colormap (RdBu_r), anchored at z=0 ───────────────────────────
+# ─── Sparse white-base colormap (Meta TRIBE v2 demo aesthetic) ─────────────
+#
+# Meta's demo paints the brain mostly WHITE with tiny saturated patches
+# where the model's prediction is highly confident (their metadata.json
+# encodes vmin=0.6, vmax=1, alpha_cmap=[0, 0.2] — i.e. only correlations
+# above 0.6 get any color, and even at correlation=1 the overlay is
+# only 20% opaque).
+#
+# We mirror that aesthetic for our z-scored TRIBE outputs: the brain
+# stays a creamy white at the resting state, and only |z| above a
+# threshold shows color. The alpha grows quadratically above threshold
+# so weak signals are barely visible and strong signals pop.
+#
+# Visible-anatomy bias: white base preserves the sulcal shading from
+# the directional lights, so the gyri/sulci read as a real cortical
+# surface instead of a uniform heatmap blob.
 
-# Same shape as aesthesis-app/lib/colormap.ts. Keep these two in lockstep —
-# they produce the same RGB output for the same z input.
-_COLD = np.array([0.16, 0.36, 0.78], dtype=np.float32)
-_NEUTRAL = np.array([0.55, 0.55, 0.62], dtype=np.float32)
-_WARM = np.array([0.85, 0.18, 0.18], dtype=np.float32)
+# Resting-state base color. Slightly off-white so it reads as "skin"
+# not "blank canvas" — picks up directional shadowing nicely.
+_WHITE_BASE = np.array([0.945, 0.940, 0.918], dtype=np.float32)
+
+# Saturated activation colors (top of the scale, unmixed).
+_COLD = np.array([0.16, 0.40, 0.85], dtype=np.float32)   # deep blue
+_WARM = np.array([0.92, 0.18, 0.18], dtype=np.float32)   # deep red
+
+# Threshold below which the brain stays white. Z-scores below 1.0
+# (one std above mean) are just baseline noise, not signal worth showing.
+_Z_THRESH = 1.0
+# Where the alpha curve maxes out. |z| beyond this saturates at MAX_ALPHA.
+_Z_MAX = 2.5
+# Maximum overlay opacity. Keeps anatomy visible even at peak activation.
+_MAX_ALPHA = 0.55
 
 
 def _diverging_color_batch(z: np.ndarray) -> np.ndarray:
-    """Vectorized z-score → RGB. Returns shape (..., 3) float32 in [0, 1].
+    """Vectorized z-score → RGB, white-base sparse-overlay (Meta-style).
 
-    Negative z → cool (blue). Positive z → warm (red). Zero → neutral.
-    Squashed through tanh so |z| > 3 saturates without flatlining.
+    Behaviour:
+      |z| < THRESH  → essentially white (resting state, no overlay)
+      |z| ≥ THRESH  → cream + warm/cool tint with growing alpha
+      |z| ≥ Z_MAX   → saturated tint (capped at MAX_ALPHA)
+
+    Returns shape ``(..., 3)`` float32 in [0, 1]. Sign of z chooses
+    cool (negative) vs warm (positive) overlay.
     """
-    z = np.where(np.isfinite(z), z, 0.0)
-    t = np.tanh(z * 0.55)  # in [-1, 1]
-    pos_mask = (t >= 0).astype(np.float32)
-    pos_t = np.clip(t, 0.0, 1.0)[..., None]
-    neg_t = np.clip(-t, 0.0, 1.0)[..., None]
-    pos_rgb = _NEUTRAL + (_WARM - _NEUTRAL) * pos_t
-    neg_rgb = _NEUTRAL + (_COLD - _NEUTRAL) * neg_t
-    return np.where(pos_mask[..., None] > 0, pos_rgb, neg_rgb).astype(np.float32, copy=False)
+    z = np.where(np.isfinite(z), z, 0.0).astype(np.float32, copy=False)
+    abs_z = np.abs(z)
+
+    # Alpha ramp: 0 below threshold, grows (quadratic-ish) up to MAX_ALPHA at Z_MAX
+    span = max(1e-6, _Z_MAX - _Z_THRESH)
+    a = np.clip((abs_z - _Z_THRESH) / span, 0.0, 1.0)
+    alpha = (a * a) * _MAX_ALPHA  # quadratic so weak signals stay near-invisible
+
+    # Pick warm/cool target based on sign
+    pos_mask = (z >= 0)
+    target = np.where(pos_mask[..., None], _WARM, _COLD)
+
+    # Alpha-blend onto white base
+    a3 = alpha[..., None]
+    blended = _WHITE_BASE * (1.0 - a3) + target * a3
+    return blended.astype(np.float32, copy=False)
 
 
 # ─── Main ────────────────────────────────────────────────────────────────────

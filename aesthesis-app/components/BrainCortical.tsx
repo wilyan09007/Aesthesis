@@ -48,6 +48,11 @@ interface BrainCorticalProps {
   trDurationS: number
   /** ROI values consumed by the placeholder fallback only. */
   roiValues?: ROIValues
+  /**
+   * Surface type. "pial" = realistic gyri/sulci anatomy (matches Meta's
+   * "Normal" tab and screenshot). "inflated" = smoothed bubble that
+   * exposes sulcal interiors. Default "pial" for the realistic look.
+   */
   variant?: "inflated" | "pial"
   size?: number
 }
@@ -188,9 +193,27 @@ function makeFaceMaterial(uniforms: FaceMaterialUniforms): THREE.MeshStandardMat
 
 // ─── Geometry post-processing (un-index + aFace attribute) ──────────────────
 
-/** Un-index a geometry and add `aFace` per-vertex attribute = floor(vIdx/3). */
+/**
+ * Un-index a geometry and add `aFace` per-vertex attribute = floor(vIdx/3).
+ *
+ * Critical for pial: compute SMOOTH per-vertex normals on the indexed
+ * mesh first, then call toNonIndexed(). Three.js carries the normal
+ * attribute through the un-index, so we end up with smooth shading on
+ * the pial cortex (gyri/sulci read as real anatomy under directional
+ * lights) AND per-face data via aFace.
+ *
+ * If we computed normals AFTER un-indexing, every face would have its
+ * own three vertices that no other face shares, and the normals would
+ * collapse to flat per-face normals — fine on the smooth inflated
+ * surface, ugly on pial because the realistic anatomy looks faceted.
+ */
 function prepareFaceGeometry(geom: THREE.BufferGeometry): THREE.BufferGeometry {
-  const ng = geom.index ? geom.toNonIndexed() : geom.clone()
+  const indexed = geom.clone()
+  // Smooth normals on the indexed mesh — vertex sharing averages face
+  // normals into per-vertex normals naturally. Required for pial; safe
+  // on inflated.
+  indexed.computeVertexNormals()
+  const ng = indexed.index ? indexed.toNonIndexed() : indexed
   const n = ng.attributes.position.count // n = 3 * nFaces after un-index
   const aFace = new Float32Array(n)
   const nFaces = Math.floor(n / 3)
@@ -201,7 +224,9 @@ function prepareFaceGeometry(geom: THREE.BufferGeometry): THREE.BufferGeometry {
     aFace[v + 2] = i
   }
   ng.setAttribute("aFace", new THREE.BufferAttribute(aFace, 1))
-  ng.computeVertexNormals() // flat normals after un-index — what we want
+  // Note: do NOT call computeVertexNormals() again here — that would
+  // override the smooth normals we just transferred from the indexed
+  // mesh.
   return ng
 }
 
@@ -225,8 +250,13 @@ class BrainScene {
     this.scene = new THREE.Scene()
     this.scene.background = null
 
-    this.camera = new THREE.PerspectiveCamera(35, 1, 0.1, 2000)
-    this.camera.position.set(0, 0, 280)
+    this.camera = new THREE.PerspectiveCamera(28, 1, 0.1, 2000)
+    // Lateral 3/4 view of the LEFT hemisphere (matches Meta's demo).
+    // Brain is in MNI/freesurfer coordinates: X is L-R (left ≤ 0), Y is
+    // A-P, Z is I-S. Camera off to the left and slightly above gives
+    // the canonical anatomy-textbook angle.
+    this.camera.position.set(-260, 60, 180)
+    this.camera.lookAt(0, 0, 0)
 
     this.renderer = new THREE.WebGLRenderer({
       canvas,
@@ -237,14 +267,16 @@ class BrainScene {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     this.renderer.setClearColor(0x000000, 0)
 
-    // Lighting matches Meta's demo style — ambient + key + fill, all dim
-    // because the diffuse comes from the data texture, not the lights.
-    this.scene.add(new THREE.AmbientLight(0xffffff, 0.55))
-    const key = new THREE.DirectionalLight(0xa0b8ff, 0.6)
-    key.position.set(3, 3, 3)
+    // Lighting tuned for white-base brain — Meta uses an ambient + soft
+    // directional combo so the gyri/sulci shadow gently. We keep the
+    // overall scene relatively bright since the diffuseColor coming
+    // from our texture is a creamy white at rest.
+    this.scene.add(new THREE.AmbientLight(0xffffff, 0.85))
+    const key = new THREE.DirectionalLight(0xffffff, 0.55)
+    key.position.set(-200, 200, 300) // upper-left key light (anatomy textbook angle)
     this.scene.add(key)
-    const fill = new THREE.DirectionalLight(0x5cf2c5, 0.25)
-    fill.position.set(-3, -2, -3)
+    const fill = new THREE.DirectionalLight(0xffffff, 0.18)
+    fill.position.set(200, -100, -200)
     this.scene.add(fill)
 
     this.controls = new OrbitControls(this.camera, canvas)
@@ -372,7 +404,7 @@ export default function BrainCortical({
   currentTime,
   trDurationS,
   roiValues,
-  variant = "inflated",
+  variant = "pial",
   size,
 }: BrainCorticalProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
