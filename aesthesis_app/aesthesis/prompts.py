@@ -20,10 +20,9 @@ INSIGHT_PROMPT_TEMPLATE = """\
 You are analyzing how a first-time visitor's brain responded to a website
 demo. The user's stated goal was: "{goal}".
 
-You will see {n_events} brain events from a {duration_s:.1f}-second screen
-recording. Each event includes the brain signal that fired, the screenshot
-at that moment, and what the user (an AI agent acting as a real user) did
-just before.
+You will see {n_events} brain events from a 30-second screen recording. Each
+event includes the brain signal that fired, the screenshot at that moment,
+and what the user (an AI agent acting as a real user) did just before.
 
 Your job: for each event, produce ONE insight in this format:
 - ux_observation: one sentence explaining what on the screen likely caused
@@ -45,10 +44,6 @@ Hard constraints:
 - Do NOT speculate beyond what the brain features support. If fear spiked
   but you can't tell from the screenshot why, say "screenshot does not
   reveal cause; possible candidates: X, Y."
-- ``timestamp_range_s`` MUST satisfy 0 <= start <= end <= {duration_s:.2f}.
-  The video is exactly {duration_s:.2f} seconds long. Anchor each range
-  at the event's ``timestamp_s`` and keep it short (≤ 3.0 s) and inside
-  the video. Never emit a timestamp greater than {duration_s:.2f}.
 - Output valid JSON conforming exactly to the output schema. No prose
   outside the JSON.
 
@@ -71,8 +66,8 @@ Events JSON:
 
 
 ASSESSMENT_PROMPT_TEMPLATE = """\
-You are summarising the brain's overall reaction to a single
-{duration_s:.1f}-second website demo. The user's goal was: "{goal}".
+You are summarising the brain's overall reaction to a single 30-second
+website demo. The user's goal was: "{goal}".
 
 You have:
 1. ABSOLUTE METRICS — eight measurements scored against this demo's own
@@ -107,9 +102,6 @@ Hard constraints:
   bounce-risk moment with timestamp.
 - ``decisive_moment`` is one sentence pointing at the single most
   consequential timestamp for this demo's first impression.
-- All timestamps you cite (in ``summary_paragraph``, ``top_strengths``,
-  ``top_concerns``, ``decisive_moment``) MUST be within
-  [0, {duration_s:.2f}] seconds — the video is exactly that long.
 - Do NOT use product-marketing language. No "delightful," "intuitive,"
   "seamless," "frictionless," "leverage," "robust."
 - Output valid JSON only. No prose outside.

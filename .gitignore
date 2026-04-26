@@ -52,3 +52,6 @@ aesthesis_app/uploads/
 
 # Test videos (too large for git; commit-ignored even if present in worktree)
 *.mp4
+
+# Local bake artifacts (parcel map, face indices); deployed to Modal volume
+data/

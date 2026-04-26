@@ -1,8 +1,8 @@
 [project]
 name = "aesthesis-app"
 version = "0.3.0.0"
-description = "Aesthesis backend orchestrator — Phase 2: URL capture + /api/analyze + TRIBE/Gemini synthesis. See DESIGN.md."
-requires-python = ">=3.11"  # browser-use 0.12 requires >=3.11
+description = "Aesthesis backend orchestrator — /api/analyze takes two MP4s, returns the full results-page JSON."
+requires-python = ">=3.10"
 
 dependencies = [
     "fastapi>=0.110",
@@ -12,27 +12,6 @@ dependencies = [
     "python-multipart>=0.0.9",
     "ffmpeg-python>=0.2",
     "google-generativeai>=0.7",
-
-    # ── Phase 2 capture pipeline (DESIGN.md §§4.1, 4.2, 4.2b) ──────────
-    # browser-use is fast-moving — pinned to the exact version we tested
-    # against (D22). Floating this kills you the first time their public
-    # API renames Browser -> BrowserSession or changes Agent.run signature.
-    "browser-use==0.12.6",
-    # Playwright is BrowserUse's underlying browser driver. Lower bound
-    # picked so chromium screencast args + new_cdp_session API are stable.
-    "playwright>=1.49,<2.0",
-    # psutil powers the cross-platform Chromium-zombie sweep on SIGKILL
-    # (D26). Critical when BrowserUse hangs and we have to take down a
-    # tree of grandchildren (Playwright driver -> Chromium).
-    "psutil>=5.9",
-    # NOTE: we do NOT use langchain. browser-use 0.12 ships its own
-    # ChatGoogle wrapper (browser_use/llm/google/chat.py) that wraps
-    # Google's official `genai` client directly — no langchain needed.
-    # ffmpeg binary fallback. We prefer system ffmpeg (already required
-    # by ffmpeg-python for screenshot extraction) but if it isn't on
-    # PATH the bundled binary keeps the capture path working without
-    # forcing the dev to install ffmpeg system-wide.
-    "imageio-ffmpeg>=0.5",
 ]
 
 [build-system]
