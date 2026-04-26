@@ -264,7 +264,77 @@ These are non-blocking but should be checked when the PR runs end-to-end:
 
 ---
 
-## 9. Sources consulted (for future reference)
+## 9. Visual evolution (per-version pivots)
+
+This section records every visual aesthetic decision and what triggered
+it. Future maintainers should add a new sub-section per change so the
+"why is the brain shaped/coloured/positioned like this" question is
+always answerable.
+
+### 9.1 v0 — heatmap blob (rejected)
+
+Initial implementation:
+- Mesh: fsaverage5 inflated, both hemispheres concatenated.
+- Colormap: aggressive diverging RdBu with `tanh(z * 0.55)` squash, applied per-vertex on the mesh, fully opaque.
+
+User feedback (with screenshot comparison to Meta's demo): "our simulation seems a lot lower quality than theirs."
+
+Concrete problems:
+- 98.6% of faces colored at any TR → looked like a heatmap, not a brain.
+- Inflated geometry hides the gyri/sulci that signal "this is a real cortex."
+- No transparency → every face fights for the eye's attention.
+
+### 9.2 v1 — Meta-look (white-base sparse opaque)
+
+Pivots:
+- Default `variant` from `inflated` → `pial` (matches Meta's "Normal" tab in the screenshot they posted).
+- Colormap: white base + alpha-blended overlay only above `|z| ≥ 1.0`, max overlay opacity 0.55. Encoded directly as RGB (no separate alpha channel).
+- Smooth normals on pial: `computeVertexNormals()` on the indexed mesh BEFORE `toNonIndexed()` so the un-indexed vertices preserve smooth-shaded normals from the canonical fsaverage5 topology.
+- Lighting tuned to neutral white (no blue/teal tint), ambient up to 0.85.
+- Camera repositioned to a lateral 3/4 view of the left hemisphere (`(-260, 60, 180) → (0, 0, 0)`).
+
+Visual result: ~51% near-white faces, 1–1.5% strong red, 0.3–0.5% strong blue. Anatomically readable but most activations were still too subtle to spot from a casual view.
+
+### 9.3 v2 — high-sensitivity glass brain (current)
+
+Pivot driven by user direction: "increase the sensitivity of the active regions by a lot, and make the entire surface near transparent."
+
+Changes:
+
+#### Sensitivity ramp
+- `_Z_THRESH`: 1.0 → **0.2** (5× more activations clear the floor).
+- `_Z_MAX`: 2.5 → **1.5** (saturation reached at lower magnitudes).
+- Quadratic ramp → **linear** (weak signals are immediately visible, not buried).
+- `_MAX_ALPHA`: 0.55 → **0.92** (peak activations are nearly opaque).
+- `_BASE_ALPHA`: implicit 0 → **0.10** (resting shell is faintly visible).
+
+#### Transparent shell
+- Wire format upgrade: `uint8_rgb_bin` (3 channels) → `uint8_rgba_bin` (4 channels). The alpha channel encodes per-face opacity directly so the shader doesn't have to compute it from RGB magnitude. Wire size grows from ~737 KB/hemi to ~983 KB/hemi (still inside Meta's order of magnitude).
+- Resting-state base color: cream-white → **gray-violet `[0.50, 0.50, 0.58]`**. Gray reads as "ghost cortex" against the dark UI background; cream looked like solid white opaque material.
+- Material: added **`transparent: true`** and **`depthWrite: false`** so per-fragment alpha controls visibility and overlapping faces blend instead of culling.
+- Shader patch: `<map_fragment>` now reads RGBA from the texture, mixes both channels temporally (uFrame0/uFrame1/uAlpha), and writes the full **`diffuseColor.rgba`** instead of just `.rgb`. The toe-lift (`pow(c, 1.05)`) and black-floor clamp still apply to the RGB channels; the missing-data RGB fallback `vec3(0.045)` no longer touches the alpha channel.
+- TypeScript type widening: `HemisphereFaceColors.format` now accepts both `"uint8_rgba_bin"` and `"uint8_rgb_bin"`. `buildAtlasTexture` auto-detects from byte count vs `n_frames * n_faces`; legacy 3-channel streams are expanded to RGBA with full opacity for backward compat (so a stale Modal worker doesn't break the frontend).
+
+#### Rendering caveats
+Three.js's painter's-algorithm sort with `depthWrite: false` can produce minor ordering artifacts on overlapping transparent faces (e.g., the medial wall blending oddly through the lateral surface from certain camera angles). For our roughly-convex brain viewed from a single side, the artifacts are tolerable. If they become objectionable, the standard fix is to split into separate `THREE.FrontSide` and `THREE.BackSide` meshes with explicit `renderOrder`, per the Codrops glass-material tutorial.
+
+#### Numbers to watch
+The bake's INFO log emits two new fields per hemisphere — `pct_alpha_gt100` and `pct_alpha_gt200` — measuring how much of the cortex shows visible vs strong activation across all TRs. Expect roughly:
+
+- `pct_alpha_gt100`: 10–30 % (significant activations, visible color)
+- `pct_alpha_gt200`: 1–8 % (peak activations, nearly opaque highlights)
+
+If `pct_alpha_gt200` is consistently 0, the threshold/ramp is too strict (or upstream data is flat). If `pct_alpha_gt100` is > 60 %, we're back in heatmap-blob territory and the threshold should be raised.
+
+### 9.4 Open follow-ups (deliberately not done in v2)
+
+- **GPU upsample to fsaverage6** — Meta's `*-upsample.bin` decoded (12-byte header + per-face 3 uint32 indices + 3 uint32 weights needing runtime normalization). Their full shader has the upsample branch already extracted. Adding this gives the smooth high-res inflated view Meta's "high" toggle produces. Skipped because Meta's screenshot uses low-res pial too — visual gap was the colormap, not the mesh density.
+- **Front/back split for clean glass rendering** — single-mesh `DoubleSide + depthWrite=false` is fine for our typical viewing angles. If overlap artifacts become user-visible, split.
+- **Emissive boost on peak activations** — would make active regions self-luminous (true "glow through" the transparent shell). Easy follow-up via patching `<emissivemap_fragment>` to write `totalEmissiveRadiance += diffuseColor.rgb * activationStrength`.
+
+---
+
+## 10. Sources consulted (for future reference)
 
 - [three.js forum — GLTF export custom attributes](https://discourse.threejs.org/t/gltf-export-custom-attributes/12443) — confirms underscore-prefix pattern.
 - [pygltflib PyPI + docs](https://pypi.org/project/pygltflib/) — GLB writer API.
@@ -274,3 +344,5 @@ These are non-blocking but should be checked when the PR runs end-to-end:
 - [three.js BufferAttribute docs](https://threejs.org/docs/api/en/constants/BufferAttributeUsage.html) — DynamicDrawUsage pattern.
 - [Schaefer et al. 2018 atlas paper](https://academic.oup.com/cercor/article/28/9/3095/3978804) — parcellation method.
 - Existing code: `tribe_service/scripts/generate_weights.py`, `tribe_service/tribe_neural/steps/step2_roi.py`, `tribe_service/tribe_neural/pipeline.py`.
+- [three.js forum — Definitive glass material](https://discourse.threejs.org/t/definitive-glass-material/22888) — `transparent: true + depthWrite: false` pattern referenced in §9.3.
+- [Codrops — Creating the Effect of Transparent Glass and Plastic](https://tympanus.net/codrops/2021/10/27/creating-the-effect-of-transparent-glass-and-plastic-in-three-js/) — front/back split when `DoubleSide` artifacts surface.

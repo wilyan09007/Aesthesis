@@ -74,32 +74,39 @@ function decodeBase64ToU8(b64: string): Uint8Array {
 }
 
 /**
- * Pack a (n_frames * n_faces) RGB byte stream into a 2D DataTexture.
+ * Pack an RGBA (or legacy RGB) byte stream into a 2D atlas DataTexture.
  *
- * Meta's atlas layout: linear index = frame * n_faces + face, then
- * row-major into a 2D texture with width capped at MAX_ATLAS_W. The
- * shader's atlasUV() function does the inverse mapping.
+ * Atlas layout: linear index = frame * n_faces + face, then row-major
+ * into a 2D texture with width capped at MAX_ATLAS_W. The shader's
+ * atlasUV() function does the inverse mapping.
  *
- * three.js r165+ removed RGBFormat — must use RGBAFormat. We expand
- * the input from 3-channel to 4-channel (alpha=255 throughout) at
- * texture-build time.
+ * Format auto-detected from byte count vs (nFrames * nFaces). RGBA
+ * data lands as-is; RGB is expanded to RGBA with alpha=255. The
+ * texture itself is always RGBA (three.js r165+ removed RGBFormat).
  */
 function buildAtlasTexture(
-  rgb: Uint8Array,
+  bytes: Uint8Array,
   nFrames: number,
   nFaces: number,
-): { tex: THREE.DataTexture; w: number; h: number; nFrames: number } {
+): { tex: THREE.DataTexture; w: number; h: number; nFrames: number; channels: 3 | 4 } {
   const total = nFrames * nFaces
+  const ch: 3 | 4 = bytes.length === total * 4 ? 4 : 3
   const w = Math.min(MAX_ATLAS_W, Math.max(64, Math.ceil(Math.sqrt(total))))
   const h = Math.ceil(total / w)
   const need = w * h * 4
-  // Expand RGB → RGBA with full alpha, padding the tail (shader clamps so unread).
   const padded = new Uint8Array(need)
-  for (let i = 0; i < total; i++) {
-    padded[i * 4 + 0] = rgb[i * 3 + 0]
-    padded[i * 4 + 1] = rgb[i * 3 + 1]
-    padded[i * 4 + 2] = rgb[i * 3 + 2]
-    padded[i * 4 + 3] = 255
+  if (ch === 4) {
+    // RGBA stream — copy as-is (alpha already encodes the activation
+    // strength from the bake; shader writes it to diffuseColor.a).
+    padded.set(bytes.subarray(0, total * 4))
+  } else {
+    // Legacy RGB stream — expand to RGBA with full opacity.
+    for (let i = 0; i < total; i++) {
+      padded[i * 4 + 0] = bytes[i * 3 + 0]
+      padded[i * 4 + 1] = bytes[i * 3 + 1]
+      padded[i * 4 + 2] = bytes[i * 3 + 2]
+      padded[i * 4 + 3] = 255
+    }
   }
   const tex = new THREE.DataTexture(padded, w, h, THREE.RGBAFormat, THREE.UnsignedByteType)
   tex.minFilter = THREE.NearestFilter
@@ -108,7 +115,7 @@ function buildAtlasTexture(
   tex.wrapT = THREE.ClampToEdgeWrapping
   tex.generateMipmaps = false
   tex.needsUpdate = true
-  return { tex, w, h, nFrames }
+  return { tex, w, h, nFrames, channels: ch }
 }
 
 // ─── Shader patches (byte-equivalent to Meta's BrainViewer bundle) ──────────
@@ -142,23 +149,30 @@ vec2 atlasUV(float face, float frame) {
 `
 
 const FRAG_MAP = `
-vec3 c0 = texture2D(uFaceTex, atlasUV(vFaceIndex, uFrame0)).rgb;
-vec3 c1 = texture2D(uFaceTex, atlasUV(vFaceIndex, uFrame1)).rgb;
-vec3 finalColor = mix(c0, c1, uAlpha);
+// Glass-brain shader path (RGBA atlas + transparent material).
+// Alpha channel of the atlas encodes activation strength: high alpha
+// for active patches (they read as solid color), low alpha for the
+// resting shell (it reads as a faint ghost outline). We flow alpha
+// into diffuseColor.a so the material's transparent flag controls
+// visibility per-fragment.
+vec4 c0 = texture2D(uFaceTex, atlasUV(vFaceIndex, uFrame0));
+vec4 c1 = texture2D(uFaceTex, atlasUV(vFaceIndex, uFrame1));
+vec4 finalColor = mix(c0, c1, uAlpha);
 
-// Slight toe lift (Meta's tuning: keeps contrast)
-finalColor = pow(finalColor, vec3(1.05));
+// Slight toe lift (Meta's tuning: keeps contrast on the RGB channels).
+finalColor.rgb = pow(finalColor.rgb, vec3(1.05));
 
-// Lower black floor so true shadows stay shadowy
-finalColor = max(finalColor, vec3(0.012));
+// Lower black floor so true shadows stay shadowy.
+finalColor.rgb = max(finalColor.rgb, vec3(0.012));
 
-// Missing-data still readable but not glowing
-float s = finalColor.r + finalColor.g + finalColor.b;
-if (s < 0.001) {
-  finalColor = vec3(0.045);
+// Missing-data fallback — but only override RGB; keep the texture's
+// alpha so the resting shell stays appropriately transparent.
+float rgbSum = finalColor.r + finalColor.g + finalColor.b;
+if (rgbSum < 0.001) {
+  finalColor.rgb = vec3(0.045);
 }
 
-diffuseColor.rgb = finalColor;
+diffuseColor.rgba = finalColor;
 `
 
 interface FaceMaterialUniforms {
@@ -171,13 +185,29 @@ interface FaceMaterialUniforms {
   uAlpha: { value: number }
 }
 
-/** Build a MeshStandardMaterial whose shader reads per-face from `uFaceTex`. */
+/** Build a MeshStandardMaterial whose shader reads per-face from `uFaceTex`.
+ *
+ * Glass-brain configuration:
+ *   transparent = true       — per-fragment alpha controls visibility
+ *   depthWrite  = false      — overlapping faces blend instead of culling
+ *   side        = DoubleSide — see both inner and outer surface
+ *
+ * With ``depthWrite=false`` you can get small ordering artifacts where
+ * two transparent faces blend in the wrong order from certain camera
+ * angles. For a roughly-convex brain mesh viewed from a single side
+ * (which is our common case), the artifacts are minor. If they ever
+ * become visible we can split into separate FrontSide + BackSide
+ * meshes with explicit renderOrder — three.js community guidance from
+ * the Codrops glass tutorial.
+ */
 function makeFaceMaterial(uniforms: FaceMaterialUniforms): THREE.MeshStandardMaterial {
   const mat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
     roughness: 0.85,
     metalness: 0.05,
     side: THREE.DoubleSide,
+    transparent: true,
+    depthWrite: false,
   })
   mat.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, uniforms)
@@ -333,17 +363,22 @@ class BrainScene {
     const m: THREE.Mesh = baseMesh
     const geom = prepareFaceGeometry(m.geometry as THREE.BufferGeometry)
 
-    // Build the atlas texture from the base64 stream
-    const rgb = decodeBase64ToU8(payload.data_b64)
+    // Build the atlas texture from the base64 stream. New format
+    // (uint8_rgba_bin) carries alpha; legacy (uint8_rgb_bin) does not.
+    // buildAtlasTexture auto-detects from byte count.
+    const bytes = decodeBase64ToU8(payload.data_b64)
     const nFrames = payload.n_frames
     const nFaces = payload.n_faces
     if (nFaces !== FACES_PER_HEMI) {
       logBC("warn", `${hemi}: face count ${nFaces} != ${FACES_PER_HEMI}`)
     }
-    const { tex, w, h } = buildAtlasTexture(rgb, nFrames, nFaces)
+    const { tex, w, h, channels } = buildAtlasTexture(bytes, nFrames, nFaces)
     this.textures[hemi] = tex
     this.nFrames[hemi] = nFrames
-    logBC("info", `${hemi}: atlas built`, { w, h, nFrames, nFaces, bytes: rgb.length })
+    logBC("info", `${hemi}: atlas built`, {
+      w, h, nFrames, nFaces, bytes: bytes.length, channels,
+      format: payload.format,
+    })
 
     const uniforms: FaceMaterialUniforms = {
       uFaceTex: { value: tex },

@@ -127,67 +127,83 @@ def _load_face_indices_cached() -> tuple[np.ndarray, np.ndarray]:
     return lh_faces, rh_faces
 
 
-# ─── Sparse white-base colormap (Meta TRIBE v2 demo aesthetic) ─────────────
+# ─── Glass-brain sparse-overlay colormap (transparent + high sensitivity) ──
 #
-# Meta's demo paints the brain mostly WHITE with tiny saturated patches
-# where the model's prediction is highly confident (their metadata.json
-# encodes vmin=0.6, vmax=1, alpha_cmap=[0, 0.2] — i.e. only correlations
-# above 0.6 get any color, and even at correlation=1 the overlay is
-# only 20% opaque).
+# Two design goals (per user direction, ASSUMPTIONS_BRAIN.md §10):
 #
-# We mirror that aesthetic for our z-scored TRIBE outputs: the brain
-# stays a creamy white at the resting state, and only |z| above a
-# threshold shows color. The alpha grows quadratically above threshold
-# so weak signals are barely visible and strong signals pop.
+#   (A) HIGH SENSITIVITY — even small activations (|z| ≥ 0.2) produce
+#       visible color, ramping fast to saturation by |z| ≈ 1.5. Most of
+#       the cortex shows colored signal at any instant, so the user
+#       can read the spatial pattern directly.
 #
-# Visible-anatomy bias: white base preserves the sulcal shading from
-# the directional lights, so the gyri/sulci read as a real cortical
-# surface instead of a uniform heatmap blob.
+#   (B) NEAR-TRANSPARENT SHELL — the resting cortex renders as a faint
+#       ghost outline (alpha ≈ 0.10), so anatomy is just suggested
+#       rather than dominant. Activated regions glow with high alpha
+#       (up to ≈ 0.92), which combined with the gray→red/blue color
+#       ramp produces a clean "glass brain with glowing patches" look.
+#
+# Output is RGBA (4 channels), unlike the prior RGB-only encoding.
+# The alpha channel is consumed by the WebGL shader (which writes it
+# into ``diffuseColor.a``) and the material is set to ``transparent =
+# true, depthWrite = false`` so per-fragment alpha controls visibility.
+#
+# Wire-format change: this changes ``shape`` from (n_TRs, 20480, 3) to
+# (n_TRs, 20480, 4) and ``byteStride`` from 3 to 4. Total size grows
+# from ~737 KB/hemi to ~983 KB/hemi (still well under Meta's 1.5 MB).
 
-# Resting-state base color. Slightly off-white so it reads as "skin"
-# not "blank canvas" — picks up directional shadowing nicely.
-_WHITE_BASE = np.array([0.945, 0.940, 0.918], dtype=np.float32)
+# Resting-state base. Slightly cool gray so it reads as "ghost cortex"
+# rather than "blank slab" — keeps directional shadowing visible in the
+# faint outline.
+_GHOST_BASE = np.array([0.50, 0.50, 0.58], dtype=np.float32)
 
-# Saturated activation colors (top of the scale, unmixed).
-_COLD = np.array([0.16, 0.40, 0.85], dtype=np.float32)   # deep blue
-_WARM = np.array([0.92, 0.18, 0.18], dtype=np.float32)   # deep red
+# Saturated activation colors. More chromatic than before since the
+# transparent shell needs strong color for active regions to read.
+_COLD = np.array([0.18, 0.42, 0.96], dtype=np.float32)   # bright blue
+_WARM = np.array([0.96, 0.20, 0.18], dtype=np.float32)   # bright red
 
-# Threshold below which the brain stays white. Z-scores below 1.0
-# (one std above mean) are just baseline noise, not signal worth showing.
-_Z_THRESH = 1.0
-# Where the alpha curve maxes out. |z| beyond this saturates at MAX_ALPHA.
-_Z_MAX = 2.5
-# Maximum overlay opacity. Keeps anatomy visible even at peak activation.
-_MAX_ALPHA = 0.55
+# Sensitivity tuning. _Z_THRESH is the "barely-noticeable" floor. Below
+# this the alpha stays at _BASE_ALPHA (faint shell). Above _Z_MAX the
+# alpha and color both saturate.
+_Z_THRESH = 0.2
+_Z_MAX = 1.5
+
+# Alpha curve — combined with the material's transparent flag, this
+# drives the "glass brain glowing patches" effect.
+_BASE_ALPHA = 0.10  # resting shell is ~90% transparent
+_MAX_ALPHA = 0.92   # peak activations are ~92% opaque (still slight bleed)
 
 
 def _diverging_color_batch(z: np.ndarray) -> np.ndarray:
-    """Vectorized z-score → RGB, white-base sparse-overlay (Meta-style).
+    """Vectorized z-score → RGBA, glass-brain transparent-overlay style.
 
     Behaviour:
-      |z| < THRESH  → essentially white (resting state, no overlay)
-      |z| ≥ THRESH  → cream + warm/cool tint with growing alpha
-      |z| ≥ Z_MAX   → saturated tint (capped at MAX_ALPHA)
+      |z| ≤ THRESH  → ghost gray, alpha = BASE_ALPHA (faint shell)
+      THRESH < |z| < Z_MAX → linear interpolation to saturated color +
+                              high alpha
+      |z| ≥ Z_MAX   → saturated warm/cool, alpha = MAX_ALPHA
 
-    Returns shape ``(..., 3)`` float32 in [0, 1]. Sign of z chooses
-    cool (negative) vs warm (positive) overlay.
+    Sign of z chooses warm (positive) vs cool (negative). Returns
+    shape ``(..., 4)`` float32 in [0, 1].
     """
     z = np.where(np.isfinite(z), z, 0.0).astype(np.float32, copy=False)
     abs_z = np.abs(z)
 
-    # Alpha ramp: 0 below threshold, grows (quadratic-ish) up to MAX_ALPHA at Z_MAX
+    # Color blend: ghost gray → warm/cool, linear with |z|/Z_MAX.
+    color_t = np.clip(abs_z / _Z_MAX, 0.0, 1.0)[..., None]
+    pos_mask = (z >= 0)[..., None]
+    target = np.where(pos_mask, _WARM, _COLD)
+    rgb = _GHOST_BASE + (target - _GHOST_BASE) * color_t
+
+    # Alpha ramp: BASE_ALPHA below threshold, linear to MAX_ALPHA above.
     span = max(1e-6, _Z_MAX - _Z_THRESH)
-    a = np.clip((abs_z - _Z_THRESH) / span, 0.0, 1.0)
-    alpha = (a * a) * _MAX_ALPHA  # quadratic so weak signals stay near-invisible
+    a_ramp = np.clip((abs_z - _Z_THRESH) / span, 0.0, 1.0)
+    alpha = _BASE_ALPHA + a_ramp * (_MAX_ALPHA - _BASE_ALPHA)
+    # Lock to BASE_ALPHA below threshold (no slow ramp from 0).
+    alpha = np.where(abs_z < _Z_THRESH, _BASE_ALPHA, alpha)
 
-    # Pick warm/cool target based on sign
-    pos_mask = (z >= 0)
-    target = np.where(pos_mask[..., None], _WARM, _COLD)
-
-    # Alpha-blend onto white base
-    a3 = alpha[..., None]
-    blended = _WHITE_BASE * (1.0 - a3) + target * a3
-    return blended.astype(np.float32, copy=False)
+    return np.concatenate(
+        [rgb, alpha[..., None]], axis=-1,
+    ).astype(np.float32, copy=False)
 
 
 # ─── Main ────────────────────────────────────────────────────────────────────
@@ -267,26 +283,33 @@ def extract_face_colors(preds: np.ndarray) -> dict:
         # Indexing trick: z_hemi[:, faces] has shape (n_trs, n_faces, 3),
         # then mean axis=2 reduces to (n_trs, n_faces).
         z_face = z_hemi[:, faces].mean(axis=2)
-        # Run through colormap in batch -> (n_trs, n_faces, 3) float
-        rgb = _diverging_color_batch(z_face)
-        # Quantize to uint8 RGB
-        rgb_u8 = np.clip(rgb * 255.0 + 0.5, 0, 255).astype(np.uint8)
-        if rgb_u8.shape != (n_trs, N_FACES_PER_HEMI, 3):
+        # Run through colormap → (n_trs, n_faces, 4) RGBA in [0, 1].
+        rgba = _diverging_color_batch(z_face)
+        # Quantize to uint8 RGBA
+        rgba_u8 = np.clip(rgba * 255.0 + 0.5, 0, 255).astype(np.uint8)
+        if rgba_u8.shape != (n_trs, N_FACES_PER_HEMI, 4):
             raise RuntimeError(
-                f"{hemi}: face color shape {rgb_u8.shape}; "
-                f"expected ({n_trs}, {N_FACES_PER_HEMI}, 3)"
+                f"{hemi}: face color shape {rgba_u8.shape}; "
+                f"expected ({n_trs}, {N_FACES_PER_HEMI}, 4)"
             )
 
         # Memory layout: face index moves fastest within a frame
-        # (matches Meta's "order: C, byteStride: 3" spec). numpy default
-        # tobytes() on (n_trs, n_faces, 3) C-contiguous array is exactly
-        # frame-major, face-minor, RGB-final — what we want.
-        binary = rgb_u8.tobytes()
+        # (matches Meta's order convention but with RGBA per face
+        # instead of RGB — alpha is the new bit). numpy default
+        # tobytes() on (n_trs, n_faces, 4) C-contiguous gives
+        # frame-major, face-minor, RGBA-final.
+        binary = rgba_u8.tobytes()
         b64 = base64.b64encode(binary).decode("ascii")
 
+        # Sanity stats useful for debugging the visualization on the
+        # frontend ("why is the brain too transparent" etc.).
+        a_chan = rgba_u8[..., 3]
+        active = float((a_chan > 100).mean()) * 100.0
+        very_active = float((a_chan > 200).mean()) * 100.0
+
         out[hemi] = {
-            "format": "uint8_rgb_bin",
-            "shape": [int(n_trs), int(N_FACES_PER_HEMI), 3],
+            "format": "uint8_rgba_bin",
+            "shape": [int(n_trs), int(N_FACES_PER_HEMI), 4],
             "n_frames": int(n_trs),
             "n_faces": int(N_FACES_PER_HEMI),
             "data_b64": b64,
@@ -297,9 +320,11 @@ def extract_face_colors(preds: np.ndarray) -> dict:
             extra={
                 "step": "face_colors",
                 "hemi": hemi,
-                "shape": list(rgb_u8.shape),
+                "shape": list(rgba_u8.shape),
                 "binary_kb": round(len(binary) / 1024, 1),
                 "b64_kb": round(len(b64) / 1024, 1),
+                "pct_alpha_gt100": round(active, 1),
+                "pct_alpha_gt200": round(very_active, 1),
             },
         )
 

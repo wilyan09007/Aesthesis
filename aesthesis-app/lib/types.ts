@@ -97,8 +97,13 @@ export type TimelineSummary = {
 }
 
 export type HemisphereFaceColors = {
-  format: "uint8_rgb_bin"
-  shape: [number, number, number] // [n_frames, n_faces, 3]
+  // "uint8_rgba_bin" is the current glass-brain format (4 channels —
+  // RGB + activation-driven alpha). "uint8_rgb_bin" is the legacy
+  // 3-channel format from earlier deploys; the frontend
+  // (buildAtlasTexture in BrainCortical.tsx) auto-detects from the
+  // byte count and treats legacy streams as fully opaque.
+  format: "uint8_rgba_bin" | "uint8_rgb_bin"
+  shape: [number, number, number] // [n_frames, n_faces, 3 | 4]
   n_frames: number
   n_faces: number
   data_b64: string
