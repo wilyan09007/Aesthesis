@@ -169,6 +169,16 @@ export type WSMessage =
   | { type: "frame"; frame_b64: string }   // legacy — no longer sent
   | { type: "stream_degraded" }
   | {
+      // Pre-warm complete: subprocess has launched Chromium, started CDP
+      // screencast (frames are already flowing on the binary channel),
+      // and constructed the LLM client. Frontend can enable the Start
+      // button. The wall-clock D1 timer hasn't started yet — that fires
+      // when /api/run/{id}/start is called.
+      type: "prewarm_ready"
+      run_id: string
+      cdp_port: number
+    }
+  | {
       type: "capture_complete"
       run_id: string
       duration_s: number

@@ -284,6 +284,125 @@ export async function startCaptureRun(args: StartCaptureArgs): Promise<RunStarte
 }
 
 /**
+ * Phase 2 pre-warm — call on Capture-screen mount to spawn the BrowserUse
+ * subprocess in stand-by mode. Returns immediately with a run_id; the
+ * frontend should open the WebSocket and wait for the `prewarm_ready`
+ * lifecycle event before enabling the Start button. Wall-clock D1
+ * timer doesn't begin until startPrewarmedCapture() fires.
+ */
+export async function prewarmCaptureRun(signal?: AbortSignal): Promise<RunStartedResponse> {
+  const url = `${API_BASE_URL}/api/prewarm`
+  const log = logScope(null)
+  log.info("prewarmCaptureRun.begin", { url })
+
+  const t0 = performance.now()
+  let resp: Response
+  try {
+    resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+      signal,
+      cache: "no-store",
+    })
+  } catch (e) {
+    const elapsed_ms = Math.round(performance.now() - t0)
+    log.error("prewarmCaptureRun.network_failure", { elapsed_ms, error: String(e) })
+    throw new AnalyzeError(
+      `Network error reaching ${url}: ${String(e)}.`,
+      0, null, null,
+    )
+  }
+
+  const elapsed_ms = Math.round(performance.now() - t0)
+  if (!resp.ok) {
+    let body: unknown = null
+    try { body = await resp.json() } catch { /* swallow */ }
+    log.error("prewarmCaptureRun.http_error", { status: resp.status, elapsed_ms, body })
+
+    let message = `Backend returned ${resp.status}`
+    let runId: string | null = null
+    if (body && typeof body === "object" && "detail" in (body as object)) {
+      const detail = (body as { detail: unknown }).detail
+      if (detail && typeof detail === "object") {
+        const d = detail as Record<string, unknown>
+        if (typeof d.message === "string") message = d.message
+        if (typeof d.active_run_id === "string") runId = d.active_run_id
+      }
+    }
+    throw new AnalyzeError(message, resp.status, body, runId)
+  }
+
+  const json = (await resp.json()) as RunStartedResponse
+  const scoped = logScope(json.run_id)
+  scoped.info("prewarmCaptureRun.done", { elapsed_ms, run_id: json.run_id })
+  return json
+}
+
+/**
+ * Phase 2 start — fire the actual capture on a pre-warmed subprocess.
+ * Call when the user clicks Start Capture, AFTER the WebSocket has
+ * received `prewarm_ready`. The wall-clock D1 timer arms here.
+ */
+export type StartPrewarmedArgs = {
+  runId: string
+  url: string
+  goal?: string | null
+  auth?: { cookies?: Array<Record<string, unknown>> } | null
+  signal?: AbortSignal
+}
+
+export async function startPrewarmedCapture(args: StartPrewarmedArgs): Promise<RunStartedResponse> {
+  const url = `${API_BASE_URL}/api/run/${encodeURIComponent(args.runId)}/start`
+  const log = logScope(args.runId)
+  log.info("startPrewarmedCapture.begin", { url, target_url: args.url, goal_present: !!(args.goal && args.goal.trim()) })
+
+  const body: Record<string, unknown> = { url: args.url }
+  if (args.goal && args.goal.trim()) body.goal = args.goal.trim()
+  if (args.auth) body.auth = args.auth
+
+  const t0 = performance.now()
+  let resp: Response
+  try {
+    resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: args.signal,
+      cache: "no-store",
+    })
+  } catch (e) {
+    const elapsed_ms = Math.round(performance.now() - t0)
+    log.error("startPrewarmedCapture.network_failure", { elapsed_ms, error: String(e) })
+    throw new AnalyzeError(
+      `Network error reaching ${url}: ${String(e)}.`,
+      0, null, args.runId,
+    )
+  }
+
+  const elapsed_ms = Math.round(performance.now() - t0)
+  if (!resp.ok) {
+    let body: unknown = null
+    try { body = await resp.json() } catch { /* swallow */ }
+    log.error("startPrewarmedCapture.http_error", { status: resp.status, elapsed_ms, body })
+    let message = `Backend returned ${resp.status}`
+    if (body && typeof body === "object" && "detail" in (body as object)) {
+      const detail = (body as { detail: unknown }).detail
+      if (typeof detail === "string") message = detail
+      else if (detail && typeof detail === "object") {
+        const d = detail as Record<string, unknown>
+        if (typeof d.message === "string") message = d.message
+      }
+    }
+    throw new AnalyzeError(message, resp.status, body, args.runId)
+  }
+
+  const json = (await resp.json()) as RunStartedResponse
+  log.info("startPrewarmedCapture.done", { elapsed_ms })
+  return json
+}
+
+/**
  * D11 step 3: analyze a captured MP4 by run_id reference (no re-upload).
  *
  * The MP4 lives server-side at upload_dir/{run_id}/video.mp4 from the

@@ -1,9 +1,12 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import LiveStreamPanel from "./LiveStreamPanel"
-import { AnalyzeError, fetchCachedDemos, startCaptureRun } from "@/lib/api"
+import {
+  AnalyzeError, fetchCachedDemos,
+  prewarmCaptureRun, startPrewarmedCapture,
+} from "@/lib/api"
 import type { CachedDemoEntry } from "@/lib/types"
 
 export type CaptureCompletePayload = {
@@ -22,6 +25,7 @@ interface CaptureViewProps {
 type StartError =
   | { kind: "in_progress"; activeRunId: string | null; message: string }
   | { kind: "network"; message: string }
+  | { kind: "not_ready"; message: string }
   | { kind: "other"; message: string }
 
 type CaptureFailedState = {
@@ -31,7 +35,24 @@ type CaptureFailedState = {
 
 const ACCENT = "#7C9CFF"
 const FAIL_RED = "#FF6B6B"
+const READY_GREEN = "#5CF2C5"
 
+/**
+ * Capture screen — two-phase pre-warm + start flow.
+ *
+ * Lifecycle:
+ *   mount ──► POST /api/prewarm ──► get run_id
+ *           ──► open WS ──► live frames begin (showing stand-by HTML)
+ *           ──► prewarm_ready WS event ──► enable Start button
+ *   user clicks Start ──► POST /api/run/{id}/start ──► navigation begins
+ *           ──► live frames now show real URL
+ *           ──► capture_complete WS event ──► bubble to parent
+ *
+ * Key UX win: user sees the live stream IMMEDIATELY on mount (~3s after
+ * page load — Chromium launch + CDP). By the time they've typed a URL
+ * and clicked Start, the agent is already warm. Click-to-first-frame
+ * latency drops from ~5-8s to ~0ms.
+ */
 export default function CaptureView({
   onCaptureComplete,
   onUseCachedDemo,
@@ -39,24 +60,81 @@ export default function CaptureView({
 }: CaptureViewProps) {
   const [url, setUrl] = useState("")
   const [goal, setGoal] = useState("")
-  const [runId, setRunId] = useState<string | null>(null)
-  const [starting, setStarting] = useState(false)
+
+  const [runId, setRunId] = useState<string | null>(null)       // assigned by /api/prewarm
+  const [prewarming, setPrewarming] = useState(false)            // /api/prewarm in flight
+  const [prewarmReady, setPrewarmReady] = useState(false)        // ws prewarm_ready arrived
+  const [starting, setStarting] = useState(false)                // /api/run/{id}/start in flight
+  const [started, setStarted] = useState(false)                  // start succeeded (URL nav running)
+
   const [startError, setStartError] = useState<StartError | null>(null)
   const [failedState, setFailedState] = useState<CaptureFailedState | null>(null)
   const [cachedDemos, setCachedDemos] = useState<CachedDemoEntry[]>([])
 
-  const canStart = url.trim().length > 0 && !starting && runId === null
+  // Track whether we've already pre-warmed to avoid double-fire on
+  // React StrictMode double-mount in dev.
+  const prewarmAttemptedRef = useRef(false)
 
-  // D29 — load the stage-day fallback list once. Empty if backend has none.
+  const canStart = (
+    url.trim().length > 0 &&
+    runId !== null &&
+    prewarmReady &&
+    !starting &&
+    !started &&
+    !failedState
+  )
+
+  // ── Pre-warm on mount (D11 + pre-warm rationale A19) ─────────────────
+  useEffect(() => {
+    if (prewarmAttemptedRef.current) return
+    prewarmAttemptedRef.current = true
+
+    let cancelled = false
+    setPrewarming(true)
+    // eslint-disable-next-line no-console
+    console.info("[aesthesis:capture] prewarm: firing on mount")
+
+    prewarmCaptureRun()
+      .then((resp) => {
+        if (cancelled) return
+        // eslint-disable-next-line no-console
+        console.info("[aesthesis:capture] prewarm: subprocess spawned", { run_id: resp.run_id })
+        setRunId(resp.run_id)
+      })
+      .catch((e) => {
+        if (cancelled) return
+        // eslint-disable-next-line no-console
+        console.error("[aesthesis:capture] prewarm.failed", { e })
+        if (e instanceof AnalyzeError && e.status === 409) {
+          setStartError({
+            kind: "in_progress",
+            activeRunId: e.runId,
+            message: e.message,
+          })
+        } else if (e instanceof AnalyzeError && e.status === 0) {
+          setStartError({ kind: "network", message: e.message })
+        } else {
+          const msg = e instanceof Error ? e.message : String(e)
+          setStartError({ kind: "other", message: msg })
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setPrewarming(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // ── D29 cached demos load ─────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false
     fetchCachedDemos()
       .then((list) => {
         if (!cancelled) setCachedDemos(list)
       })
-      .catch(() => {
-        // fetchCachedDemos already swallows; this is belt-and-suspenders
-      })
+      .catch(() => { /* swallow per fetchCachedDemos contract */ })
     return () => {
       cancelled = true
     }
@@ -64,28 +142,40 @@ export default function CaptureView({
 
   const matchingCachedDemo = cachedDemos.find((d) => d.url === url.trim())
 
+  // ── Handlers ──────────────────────────────────────────────────────────
+
+  function handlePrewarmReady(info: { run_id: string; cdp_port: number }) {
+    // eslint-disable-next-line no-console
+    console.info("[aesthesis:capture] prewarm_ready arrived", info)
+    setPrewarmReady(true)
+  }
+
   async function handleStart() {
+    if (!runId) {
+      setStartError({ kind: "other", message: "internal: no run_id when start clicked" })
+      return
+    }
     setStartError(null)
-    setFailedState(null)
     setStarting(true)
     // eslint-disable-next-line no-console
-    console.info("[aesthesis:capture] handleStart", { url, goal_present: !!goal.trim() })
+    console.info("[aesthesis:capture] handleStart", { runId, url, goal_present: !!goal.trim() })
+
     try {
-      const resp = await startCaptureRun({ url: url.trim(), goal: goal.trim() || null })
-      setRunId(resp.run_id)
+      await startPrewarmedCapture({
+        runId,
+        url: url.trim(),
+        goal: goal.trim() || null,
+      })
+      setStarted(true)
       // eslint-disable-next-line no-console
-      console.info("[aesthesis:capture] run_started", { run_id: resp.run_id })
+      console.info("[aesthesis:capture] start_capture sent", { runId })
     } catch (e) {
       // eslint-disable-next-line no-console
       console.error("[aesthesis:capture] start_failed", { e })
-      if (e instanceof AnalyzeError && e.status === 409) {
-        setStartError({
-          kind: "in_progress",
-          activeRunId: e.runId,
-          message: e.message,
-        })
-      } else if (e instanceof AnalyzeError && e.status === 0) {
+      if (e instanceof AnalyzeError && e.status === 0) {
         setStartError({ kind: "network", message: e.message })
+      } else if (e instanceof AnalyzeError && (e.status === 404 || e.status === 409)) {
+        setStartError({ kind: "not_ready", message: e.message })
       } else {
         const msg = e instanceof Error ? e.message : String(e)
         setStartError({ kind: "other", message: msg })
@@ -116,14 +206,52 @@ export default function CaptureView({
   }
 
   function handleRetry() {
+    // Reset everything; useEffect with prewarmAttemptedRef.current=true
+    // means we won't re-prewarm. Force it by toggling the ref.
+    prewarmAttemptedRef.current = false
     setRunId(null)
+    setPrewarmReady(false)
+    setStarting(false)
+    setStarted(false)
     setFailedState(null)
     setStartError(null)
+    // The next render's effect will re-fire because prewarmAttemptedRef
+    // is false again. But useEffect's cancellation guard means we need
+    // to remount — easier: force the effect to re-run by changing a key.
+    // Pragmatic workaround: just call prewarmCaptureRun directly here.
+    setPrewarming(true)
+    prewarmCaptureRun()
+      .then((resp) => {
+        prewarmAttemptedRef.current = true
+        setRunId(resp.run_id)
+      })
+      .catch((e) => {
+        const msg = e instanceof Error ? e.message : String(e)
+        setStartError({ kind: "other", message: msg })
+      })
+      .finally(() => setPrewarming(false))
   }
 
   function handleUseCached() {
     if (!matchingCachedDemo) return
     onUseCachedDemo(matchingCachedDemo, goal.trim() || null)
+  }
+
+  // ── Status text for the configure panel ─────────────────────────────
+  let statusLabel = ""
+  let statusColor = ACCENT
+  if (startError) {
+    statusLabel = "Failed"
+    statusColor = FAIL_RED
+  } else if (started) {
+    statusLabel = "Recording…"
+    statusColor = FAIL_RED
+  } else if (prewarmReady) {
+    statusLabel = "Ready"
+    statusColor = READY_GREEN
+  } else if (prewarming || runId) {
+    statusLabel = "Preparing browser…"
+    statusColor = ACCENT
   }
 
   return (
@@ -153,13 +281,21 @@ export default function CaptureView({
           initial={{ opacity: 0, y: 16 }}
           animate={{ opacity: 1, y: 0 }}
         >
-          <h2 className="text-lg font-medium mb-5" style={{ color: "#e8eaf0" }}>Configure Capture</h2>
+          <div className="flex items-start justify-between mb-5">
+            <h2 className="text-lg font-medium" style={{ color: "#e8eaf0" }}>Configure Capture</h2>
+            {statusLabel && (
+              <div className="flex items-center gap-2 text-xs">
+                <div className="w-1.5 h-1.5 rounded-full" style={{ background: statusColor, animation: prewarmReady && !started ? "" : "pulse-glow 1.4s infinite" }} />
+                <span style={{ color: statusColor }}>{statusLabel}</span>
+              </div>
+            )}
+          </div>
           <InputField
             label="Demo URL"
             placeholder="https://your-demo.example.com"
             value={url}
             onChange={setUrl}
-            disabled={runId !== null}
+            disabled={started}
           />
           <div className="h-3" />
           <InputField
@@ -167,7 +303,7 @@ export default function CaptureView({
             placeholder="e.g. complete the signup flow"
             value={goal}
             onChange={setGoal}
-            disabled={runId !== null}
+            disabled={started}
           />
 
           <div className="flex items-center gap-3 mt-5">
@@ -183,20 +319,29 @@ export default function CaptureView({
               }}
               whileHover={canStart ? { scale: 1.02 } : {}}
             >
-              {starting ? "Starting…" : runId ? "Capturing…" : "Start Capture"}
+              {starting ? "Starting…" : started ? "Capturing…" : prewarmReady ? "Start Capture" : "Preparing…"}
             </motion.button>
 
-            {runId && !failedState && (
+            {!prewarmReady && !startError && runId && (
+              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex items-center gap-2">
+                <div className="w-1.5 h-1.5 rounded-full" style={{ background: ACCENT, animation: "pulse-glow 1.4s infinite" }} />
+                <span className="text-xs" style={{ color: "rgba(255,255,255,0.4)" }}>
+                  Browser warming up… <span className="font-mono opacity-60">{runId.slice(0, 8)}</span>
+                </span>
+              </motion.div>
+            )}
+
+            {started && !failedState && (
               <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex items-center gap-2">
                 <div className="w-1.5 h-1.5 rounded-full" style={{ background: FAIL_RED, animation: "pulse-glow 1s infinite" }} />
                 <span className="text-xs" style={{ color: "rgba(255,255,255,0.4)" }}>
-                  Recording live session…  <span className="font-mono opacity-60">{runId.slice(0, 8)}</span>
+                  Recording live session… <span className="font-mono opacity-60">{runId?.slice(0, 8)}</span>
                 </span>
               </motion.div>
             )}
           </div>
 
-          {/* Start-time errors (409 / network / other) */}
+          {/* Start-time errors */}
           <AnimatePresence>
             {startError && (
               <motion.div
@@ -211,8 +356,10 @@ export default function CaptureView({
                     )}. Wait for it to finish or contact the operator.</>
                   ) : startError.kind === "network" ? (
                     <>Network error reaching the backend. Is <code>uvicorn</code> running on :8000?</>
+                  ) : startError.kind === "not_ready" ? (
+                    <>Pre-warm subprocess is no longer ready: {startError.message}. Click Retry to spawn a fresh one.</>
                   ) : (
-                    <>Failed to start capture: {startError.message}</>
+                    <>Failed to {prewarmReady ? "start capture" : "pre-warm browser"}: {startError.message}</>
                   )}
                 </p>
               </motion.div>
@@ -220,7 +367,8 @@ export default function CaptureView({
           </AnimatePresence>
         </motion.div>
 
-        {/* Live panel — mounted only after we have a real backend run_id */}
+        {/* Live panel — mounted as soon as we have a runId from /api/prewarm.
+            Initially shows the stand-by HTML; transitions to real URL after Start. */}
         {runId && !failedState && (
           <motion.div
             className="flex-1"
@@ -230,6 +378,7 @@ export default function CaptureView({
           >
             <LiveStreamPanel
               runId={runId}
+              onPrewarmReady={handlePrewarmReady}
               onCaptureComplete={handleCaptureComplete}
               onCaptureFailed={handleCaptureFailed}
             />
@@ -266,7 +415,7 @@ export default function CaptureView({
                     className="px-4 py-2 rounded-lg text-xs font-medium"
                     style={{
                       background: "rgba(92,242,197,0.1)", border: "1px solid rgba(92,242,197,0.3)",
-                      color: "#5CF2C5", cursor: "pointer",
+                      color: READY_GREEN, cursor: "pointer",
                     }}
                   >
                     Use cached demo: {matchingCachedDemo.label}
@@ -287,7 +436,7 @@ export default function CaptureView({
           </motion.div>
         )}
 
-        {/* Empty state — pre-start */}
+        {/* Empty state — pre-mount, before /api/prewarm returns */}
         {!runId && !failedState && (
           <motion.div
             className="flex-1"
@@ -295,7 +444,7 @@ export default function CaptureView({
             animate={{ opacity: 1 }}
             transition={{ delay: 0.2 }}
           >
-            <EmptyPanel />
+            <EmptyPanel prewarming={prewarming} />
           </motion.div>
         )}
       </div>
@@ -333,11 +482,13 @@ function InputField({ label, placeholder, value, onChange, disabled }: {
   )
 }
 
-function EmptyPanel() {
+function EmptyPanel({ prewarming }: { prewarming: boolean }) {
   return (
     <div className="rounded-xl panel flex items-center justify-center aspect-video">
       <div className="text-center">
-        <p className="text-xs" style={{ color: "rgba(255,255,255,0.2)" }}>Stream will appear here</p>
+        <p className="text-xs" style={{ color: "rgba(255,255,255,0.2)" }}>
+          {prewarming ? "Spawning browser subprocess…" : "Stream will appear here"}
+        </p>
       </div>
     </div>
   )

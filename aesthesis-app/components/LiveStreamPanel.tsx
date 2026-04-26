@@ -7,6 +7,9 @@ import type { WSMessage } from "@/lib/types"
 
 interface LiveStreamPanelProps {
   runId: string
+  /** Fires once when backend sends `prewarm_ready` — the subprocess is
+   *  warm, frames are flowing, and the Start button can be armed. */
+  onPrewarmReady?: (info: { run_id: string; cdp_port: number }) => void
   /** Fires once when backend sends `capture_complete`. Carries info from
    *  the WS message so the parent can stash it alongside the run_id. */
   onCaptureComplete?: (info: { run_id: string; duration_s: number; mp4_size_bytes: number; n_actions: number }) => void
@@ -50,6 +53,7 @@ const FRAME_QUEUE_MAX = 3
  */
 export default function LiveStreamPanel({
   runId,
+  onPrewarmReady,
   onCaptureComplete,
   onCaptureFailed,
 }: LiveStreamPanelProps) {
@@ -57,6 +61,7 @@ export default function LiveStreamPanel({
   const queueRef = useRef<ArrayBuffer[]>([])
   const lastPaintRef = useRef<number>(0)
   const rafIdRef = useRef<number | null>(null)
+  const prewarmFiredRef = useRef<boolean>(false)
   const completionFiredRef = useRef<boolean>(false)
   const failureFiredRef = useRef<boolean>(false)
 
@@ -197,6 +202,18 @@ export default function LiveStreamPanel({
       // eslint-disable-next-line no-console
       console.warn("[aesthesis:capture] ws.stream_degraded", { runId })
       setDegraded(true)
+      return
+    }
+
+    if (msg.type === "prewarm_ready") {
+      // eslint-disable-next-line no-console
+      console.info("[aesthesis:capture] ws.prewarm_ready", { runId, ...msg })
+      // D32 — backend replays this on reconnect; gate so the parent only
+      // sees one fire per run_id.
+      if (!prewarmFiredRef.current) {
+        prewarmFiredRef.current = true
+        onPrewarmReady?.({ run_id: msg.run_id, cdp_port: msg.cdp_port })
+      }
       return
     }
 
