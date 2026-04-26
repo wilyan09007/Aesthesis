@@ -365,6 +365,152 @@ orchestrator. No automatic cleanup of failed runs — manual
 
 ---
 
+## A19. Pre-warm two-phase architecture (post-build refinement)
+
+**Problem:** cold start of the capture subprocess is ~3-7 seconds:
+Chromium launch (1-2s), CDP screencast handshake (~100ms), heavy Python
+imports (browser-use + playwright pull a lot — ~500ms-1s), `ChatGoogle`
+construction + genai HTTPS prime (~500ms-1s), first LLM call latency
+(~1-3s for cold connection). All happen between the user clicking Start
+and the first frame appearing.
+
+**Solution:** spawn the subprocess earlier, on the user's *navigation*
+to the Capture screen, not on their click. Two-phase lifecycle:
+
+1. **Pre-warm** (fires on `useEffect` when `CaptureView` mounts):
+   - `POST /api/prewarm` → backend spawns subprocess
+   - Subprocess does Chromium launch + CDP screencast + ChatGoogle init
+   - Subprocess opens a stand-by HTML page (data: URL — see A22) so the
+     live stream has SOMETHING to render
+   - Subprocess emits ``{"type":"prewarm_ready", ...}`` on stdout
+   - Backend forwards as JSON WS message; frontend flips Start button
+     from disabled to enabled
+
+2. **Capture** (fires on user click of Start Capture):
+   - `POST /api/run/{id}/start` with the URL + goal + optional auth
+   - Backend writes `{"type":"start", "url":..., "goal":...}` to
+     subprocess stdin
+   - Subprocess reads the line, injects cookies (D31), navigates to
+     URL, constructs `Agent`, runs
+
+**Outcome:** click-to-first-frame latency drops from ~5-8s to ~0ms
+(everything's already running; subprocess just navigates and runs the
+agent loop). User-perceived UX win is significant.
+
+**Backwards compat:** legacy `POST /api/run` still works — internally it
+just calls `start_run(prewarm_only=False)` which spawns the subprocess
+AND auto-sends the start command as soon as `prewarm_ready` arrives.
+Same end-to-end behavior as before, no observable change for callers
+that haven't migrated.
+
+**Stdin protocol** (parent → subprocess): newline-delimited JSON. One
+command type defined: `{"type":"start","url":"...","goal":"...","auth":{...}}`.
+After sending, parent closes stdin (signals "no more commands").
+
+**Stdin reader** (subprocess side): asyncio support for reading the
+subprocess's own stdin is platform-specific (Windows ProactorEventLoop
+has known issues with stdin pipes). We side-step that with a daemon
+thread that does blocking line reads on `sys.stdin` and pumps complete
+lines onto an `asyncio.Queue` via `loop.call_soon_threadsafe`. Works
+the same on Linux/macOS/Windows.
+
+---
+
+## A20. D1 wall-clock timer is deferred until phase = running
+
+**Problem:** if the wall-clock D1 timer started on subprocess spawn,
+a user who took 30s to type a URL would have their capture killed
+before they clicked Start.
+
+**Solution:** `CaptureRunner._wallclock_task` is NOT created in
+`CaptureRunner.start()` anymore. Instead, it's spawned in
+`start_capture()`, alongside the phase transition `warming/ready →
+running`. The `capture_max_wall_s` budget is for the actual capture,
+not pre-warm idle.
+
+**Pre-warm time IS still bounded** by D27 — if the WS subscriber set
+goes empty for 3 seconds (user navigated away, closed tab, etc.), the
+3-second grace timer fires SIGKILL regardless of phase. So a forgotten
+pre-warm doesn't leak Chromium forever.
+
+**Verified by:** `tests/test_prewarm.py::test_wallclock_NOT_armed_during_prewarm`
+forces `capture_max_wall_s=5`, sleeps 7s in pre-warm, asserts the
+runner is still in `ready` phase. Fails loud if the wall-clock fires
+during pre-warm.
+
+---
+
+## A21. D21 spike script — coexistence verification
+
+**Location:** `aesthesis_app/scripts/spike_d21_browseruse_cdp_coexistence.py`
+
+**What it tests** (the architectural risks the eng review flagged):
+1. Playwright + browser-use 0.12 + CDP screencast all coexist on the
+   same Chromium without one killing the other
+2. browser-use's `Browser(cdp_url=...)` connects without conflict to
+   our Chromium and `Page.startScreencast` keeps emitting frames
+   throughout `agent.run()`
+3. ffmpeg `image2pipe` produces a valid H.264 MP4 that ffprobe accepts
+   (validation.py:92 enforces this)
+
+**Run it:**
+```bash
+cd <repo root>
+export GEMINI_API_KEY=...
+python aesthesis_app/scripts/spike_d21_browseruse_cdp_coexistence.py
+```
+
+**Exit codes:**
+- `0` — pass; architecture is verified end-to-end
+- `1` — environmental issue (missing key/chromium/ffmpeg) — bail loudly
+- `2` — coexistence failure — the architecture is broken and the spike
+  output explains where (single-subscriber screencast conflict, agent
+  refusing cdp_url, MP4 validation reject, etc.)
+
+**Known limitations:**
+- Spike uses `https://example.com` by default; override with
+  `D21_TARGET_URL=...` for your own demo URL
+- Goal defaults to "explore the homepage briefly"; override with
+  `D21_GOAL=...`
+- Recording cap defaults to 15s; override with `D21_MAX_S=...`
+
+This is the verification step from the eng review that I committed to
+running before relying on the production capture pipeline. It's
+standalone — runs in ~30 seconds + Chromium download (one-time).
+
+---
+
+## A22. Stand-by HTML uses a `data:` URL (no network round-trip)
+
+**Choice:** the pre-warm phase navigates the page to a `data:text/html`
+URL containing a small inline HTML doc that says "Browser ready" with a
+pulsing dot. The HTML is a constant in `browser_agent.py`.
+
+**Why `data:` URL:**
+- Zero network dependency — works offline, on a flaky link, behind a
+  firewall, in CI
+- No third-party server to host
+- Consistent rendering — no risk of "the standby page failed to load,
+  user sees a blank tab" failure mode
+- Tiny — the HTML is ~700 bytes inline
+
+**Why navigate AT ALL during pre-warm** (vs. leaving Chromium on
+about:blank): so the user's live stream has something visible during
+pre-warm. about:blank renders as a flat white page and gives no hint
+that the system is alive. The pulsing dot + "Browser ready / Configure
+capture and click Start" text confirms the pipeline works end-to-end
+(Chromium → CDP screencast → backend → WS → canvas) even before the
+user does anything.
+
+**Browser-use note:** browser-use's `Agent.add_new_task()` could in
+theory let us re-use a single Agent across pre-warm and start, with the
+task swapped out. We don't bother — Agent construction is cheap
+(~50-200ms) and constructing fresh on the start command keeps the code
+simpler. The Chromium + CDP + LLM client (the expensive parts) stay
+across the phase transition.
+
+---
+
 ## A18. Frontend smoothness pipeline (D30 a/b/c)
 
 **D30a (jitter buffer):** frames arrive bursty over WebSocket; even at a
