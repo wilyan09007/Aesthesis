@@ -309,12 +309,30 @@ class BrainScene {
     fill.position.set(200, -100, -200)
     this.scene.add(fill)
 
+    // OrbitControls: rotate + zoom (with trackpad pinch). Pan stays off
+    // so the user can't accidentally drag the brain off-screen.
+    //
+    // Trackpad pinch: handled automatically by OrbitControls' wheel-event
+    // path. Two-finger pinch on macOS / Windows precision touchpad emits
+    // ctrl+wheel events (or scaled wheel events) that the controller
+    // reads as a dolly. Standard mouse-wheel also zooms.
+    //
+    // Distance limits prevent zoom-through (going inside the mesh) and
+    // zoom-to-infinity (losing the brain). The brain's bounding box is
+    // ~150 units wide; default camera distance is ~325, so [80, 700]
+    // gives a comfortable range from "filling the viewport" to
+    // "small thumbnail" without weirdness.
     this.controls = new OrbitControls(this.camera, canvas)
-    this.controls.enableZoom = false
-    this.controls.enablePan = false
     this.controls.enableRotate = true
+    this.controls.rotateSpeed = 1.0          // default — feels natural
+    this.controls.enableZoom = true
+    this.controls.zoomSpeed = 1.2            // snappier trackpad pinch
+    this.controls.zoomToCursor = true        // zoom toward cursor, not center
+    this.controls.minDistance = 80
+    this.controls.maxDistance = 700
+    this.controls.enablePan = false
     this.controls.enableDamping = true
-    this.controls.dampingFactor = 0.08
+    this.controls.dampingFactor = 0.1        // smooth post-release, no overshoot
 
     const animate = () => {
       this.raf = requestAnimationFrame(animate)

@@ -131,7 +131,7 @@ export default function ResultsView({ data, videoFile, onReset }: ResultsViewPro
                   className="absolute bottom-2 left-0 right-0 text-center text-[10px] tracking-wide pointer-events-none"
                   style={{ color: "rgba(255,255,255,0.25)" }}
                 >
-                  drag to rotate
+                  drag to rotate · pinch to zoom
                 </p>
               </div>
             </div>
