@@ -47,15 +47,30 @@ export default function VideoPlayer({ file, currentTime, onTimeUpdate }: VideoPl
   }
 
   return (
-    <div className="flex-1 rounded-xl overflow-hidden panel flex flex-col">
+    // Cap the player at half the viewport in each dimension so it sits
+    // side-by-side with the Brain3D column instead of dominating the row.
+    // ``height: 50vh`` is explicit (not ``maxHeight``) so the inner video
+    // area can use ``flex-1`` against a definite container — that's what
+    // ``object-contain`` needs to letterbox correctly. ``maxWidth: 50vw``
+    // is the upper-bound from the spec; the row still uses ``flex-1`` so
+    // the brain column always fits beside it.
+    //
+    // Previously: outer had ``flex-1`` with no height cap, inner had
+    // ``flex-1 aspect-video``. ``items-stretch`` on the parent section
+    // plus the duelling flex/aspect rules made the frame grow to fill
+    // the whole viewport.
+    <div
+      className="flex-1 min-w-0 rounded-xl overflow-hidden panel flex flex-col"
+      style={{ maxWidth: "50vw", height: "50vh" }}
+    >
       {/* Header */}
-      <div className="flex items-center gap-2 px-4 py-3" style={{ borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
+      <div className="flex items-center gap-2 px-4 py-3 shrink-0" style={{ borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
         <div className="w-2 h-2 rounded-full" style={{ background: ACCENT }} />
         <span className="text-sm font-medium" style={{ color: "#e8eaf0" }}>Demo recording</span>
       </div>
 
-      {/* Video */}
-      <div className="relative flex-1 bg-black aspect-video">
+      {/* Video — fills remaining height; ``object-contain`` letterboxes. */}
+      <div className="relative flex-1 min-h-0 bg-black">
         {file ? (
           <video
             ref={videoRef}
