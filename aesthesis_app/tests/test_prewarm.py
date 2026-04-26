@@ -12,6 +12,9 @@ no skipif, no fakes. Tests fail loudly when the env is wrong.
 from __future__ import annotations
 
 import asyncio
+import shutil
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -235,6 +238,120 @@ async def test_concurrent_prewarm_returns_409(
                 pass
         runner1._kill_chromium_zombies()
         capture_runner._REGISTRY.pop(runner1.run_id, None)
+
+
+@pytest.mark.asyncio
+async def test_warm_frames_excluded_from_mp4(
+    isolated_config: AppConfig,
+    gemini_api_key: str,         # noqa: ARG001
+    chromium_available: None,    # noqa: ARG001
+    ffmpeg_path: str,
+    monkeypatch,
+) -> None:
+    """A23 regression: standby-page frames captured during pre-warm must
+    NOT survive into the final MP4. Otherwise TRIBE analyzes brain
+    response to a pulsing standby dot + user typing-time idle.
+
+    Test approach:
+      1. Spawn pre-warm subprocess
+      2. Wait for prewarm_ready
+      3. Sleep 5s in pre-warm (accumulates ~50 standby frames @ 10fps)
+      4. Send start command with max_recording_s=5
+      5. Wait for capture_complete
+      6. ffprobe the resulting MP4
+      7. Assert duration ≤ 7s
+         - With fix:    ~5s (only capture phase frames in MP4)
+         - Without fix: ~13s (5s warm + 8s capture cap + nav)
+
+    Threshold of 7s sits comfortably between the two cases.
+    """
+    monkeypatch.setenv("CAPTURE_MAX_WALL_S", "60")
+    monkeypatch.setenv("CAPTURE_RECORDING_CAP_S", "5")
+    config_module._config = None
+    cfg = get_config()
+
+    runner = await capture_runner.start_run(None, cfg=cfg, prewarm_only=True)
+    completion_event = asyncio.Event()
+    completion_payload: dict = {}
+
+    # Subscribe a fake WS-equivalent that captures the capture_complete event
+    class _Sub:
+        async def send_json(self, msg):  # noqa: ANN001
+            if msg.get("type") == "capture_complete":
+                completion_payload.update(msg)
+                completion_event.set()
+
+        async def send_bytes(self, _):  # noqa: ANN001
+            pass
+
+    sub = _Sub()
+    runner.subscribers.add(sub)  # type: ignore[arg-type]
+
+    try:
+        await asyncio.wait_for(runner._prewarm_ready_event.wait(), timeout=30.0)
+
+        # Deliberate 5s pre-warm idle to accumulate standby frames
+        await asyncio.sleep(5.0)
+
+        # Use a data: URL so the test doesn't depend on the network
+        await runner.start_capture(
+            url="data:text/html,<h1>capture target</h1><p>nothing fancy</p>",
+            goal="just observe this page",
+            auth=None,
+        )
+
+        # Wait for capture_complete (recording cap = 5s + ffmpeg ~2s + cleanup)
+        try:
+            await asyncio.wait_for(completion_event.wait(), timeout=30.0)
+        except asyncio.TimeoutError:
+            pytest.fail(
+                "capture_complete never arrived within 30s. Subprocess likely "
+                "crashed before encoding the MP4."
+            )
+
+        # Find the MP4 + ffprobe its duration
+        mp4_path = cfg.upload_dir / runner.run_id / "video.mp4"
+        assert mp4_path.exists(), f"capture_complete fired but {mp4_path} missing"
+
+        # Locate ffprobe — same hierarchy as _find_ffmpeg in browser_agent
+        ffprobe = shutil.which("ffprobe")
+        if not ffprobe:
+            try:
+                import imageio_ffmpeg  # type: ignore
+                _base = Path(imageio_ffmpeg.get_ffmpeg_exe()).parent
+                _cand = _base / ("ffprobe.exe" if sys.platform == "win32" else "ffprobe")
+                if _cand.exists():
+                    ffprobe = str(_cand)
+            except ImportError:
+                pass
+        if not ffprobe:
+            pytest.fail("ffprobe not available — needed to measure MP4 duration")
+
+        out = subprocess.check_output([
+            ffprobe, "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=nw=1:nk=1", str(mp4_path),
+        ], text=True).strip()
+        duration_s = float(out)
+
+        # Capture cap is 5s. Anything ≤7s proves the pre-warm frames were
+        # cleared. Anything ≥10s proves the bug regressed.
+        assert duration_s <= 7.0, (
+            f"MP4 duration is {duration_s:.2f}s — too long. The pre-warm "
+            f"buffer wasn't cleared before navigation, so 5s of standby "
+            f"frames + 5s of capture got encoded together. Expected ~5s. "
+            f"This is the A23 regression — TRIBE would analyze the "
+            f"standby HTML as part of the demo."
+        )
+    finally:
+        if runner.proc:
+            runner.proc.kill()
+            try:
+                await asyncio.wait_for(runner.proc.wait(), timeout=10.0)
+            except asyncio.TimeoutError:
+                pass
+        runner._kill_chromium_zombies()
+        capture_runner._REGISTRY.pop(runner.run_id, None)
+        config_module._config = None
 
 
 @pytest.mark.asyncio

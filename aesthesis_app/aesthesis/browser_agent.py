@@ -606,13 +606,36 @@ async def _run_two_phase(args: argparse.Namespace) -> None:
                          extra={"step": "agent", "run_id": run_id, "phase": "warming",
                                 "n_cookies": len(cookie_dicts)})
 
+            # ── A23: drop warm-up frames from the MP4 buffer ──
+            # The streamer started during pre-warm and has been stashing
+            # standby-page frames into frames_for_mp4 the whole time. If
+            # we don't clear them now, the final MP4 will include the
+            # "Browser ready" standby HTML + the user's typing-time idle
+            # + the navigation transition, contaminating the TRIBE +
+            # Gemini analysis with frames that aren't part of the demo.
+            #
+            # Clear right BEFORE page.goto so the MP4 starts from the
+            # first frame of the real URL load. The live stream
+            # (sys.stdout) is unaffected — it keeps emitting every frame
+            # so the user sees an uninterrupted "watch the agent work"
+            # UX. Only the MP4 encoding source resets.
+            n_warm_frames = len(streamer.frames_for_mp4)
+            streamer.frames_for_mp4.clear()
+            log.info(
+                "agent.warm_frames_dropped_from_mp4",
+                extra={"step": "agent", "run_id": run_id, "phase": "running",
+                       "n_dropped": n_warm_frames,
+                       "reason": "pre-warm standby frames not part of demo"},
+            )
+
             # Real navigation
             log.info("agent.real_nav_begin",
                      extra={"step": "agent", "run_id": run_id, "phase": "running",
                             "url": cmd.url})
             await page.goto(cmd.url, wait_until="domcontentloaded", timeout=15_000)
             log.info("agent.real_nav_done",
-                     extra={"step": "agent", "run_id": run_id, "phase": "running"})
+                     extra={"step": "agent", "run_id": run_id, "phase": "running",
+                            "n_frames_post_nav": len(streamer.frames_for_mp4)})
 
             # Build BrowserUse on top of OUR Chromium
             bu_browser = Browser(cdp_url=f"http://127.0.0.1:{cdp_port}")

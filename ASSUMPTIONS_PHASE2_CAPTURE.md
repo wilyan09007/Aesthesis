@@ -480,6 +480,48 @@ standalone — runs in ~30 seconds + Chromium download (one-time).
 
 ---
 
+## A23. Warm-up frames are dropped from the final MP4
+
+**Bug found:** when pre-warm was added (A19), the AdaptiveStreamer started
+its CDP screencast immediately and accumulated standby-HTML frames into
+`frames_for_mp4` from the moment of subprocess spawn. If left unfixed,
+the MP4 sent to TRIBE + Gemini would include:
+
+  ~50 frames of "Browser ready" standby HTML (pre-warm phase)
+  + variable idle frames during URL/Goal typing (~30s × 10fps = ~300 frames)
+  + 50-300 frames of the actual demo
+
+TRIBE would then "see" the user's brain reacting to a pulsing dot, then
+to nothing, then to the demo — contaminating the analysis with material
+that isn't part of the captured experience.
+
+**Fix:** in `browser_agent._run_two_phase`, immediately before
+`await page.goto(cmd.url, ...)` (the real navigation), call
+`streamer.frames_for_mp4.clear()`. The buffer resets to zero. All
+subsequent frames (URL load + agent run) are the only ones that survive
+into ffmpeg-encode.
+
+**The live stream is unaffected.** Frames continue to flow to
+`sys.stdout` for every screencast event regardless of whether they're
+in `frames_for_mp4`. The user sees an uninterrupted "watch the agent
+work" UX — the stand-by HTML, the navigation transition, and the agent
+loop are all visible live. The MP4 just doesn't include the pre-real-nav
+material.
+
+**Verbose logging:** `agent.warm_frames_dropped_from_mp4` logs the count
+of frames cleared with `reason="pre-warm standby frames not part of
+demo"`. Easy to grep when debugging — if N is suspiciously large
+(say >300), that means the user took a long time to click Start, and
+the standby buffer accumulated a lot.
+
+**Verified by:** `tests/test_prewarm.py::test_warm_frames_excluded_from_mp4`
+spawns a real subprocess, lets it pre-warm for 5s (accumulating standby
+frames), sends start with `max_recording_s=5`, ffprobes the resulting
+MP4, asserts duration is ≤7s (clean: ~5s; with bug: ~13s). Threshold
+chosen well above the clean case and well below the bug case.
+
+---
+
 ## A22. Stand-by HTML uses a `data:` URL (no network round-trip)
 
 **Choice:** the pre-warm phase navigates the page to a `data:text/html`
