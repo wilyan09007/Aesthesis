@@ -351,8 +351,6 @@ interface AnalyzingPanelProps {
   isResolved: boolean
 }
 
-const ACCENT = "#7C9CFF"
-
 function AnalyzingPanel({ videoFile, state, isResolved }: AnalyzingPanelProps) {
   const { stageIndex, progress, done } = state
   const videoUrlRef = useRef<string | null>(null)
