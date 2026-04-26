@@ -204,9 +204,16 @@ export default function ResultsView({ data, videoFile, onReset, savedRunId, save
                   {data.insights.length} moment{data.insights.length === 1 ? "" : "s"}
                 </span>
               </div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-2 gap-3 items-start">
                 {data.insights.map((insight, i) => (
-                  <InsightCard key={i} insight={insight} index={i} onSeek={handleSeek} />
+                  <InsightCard
+                    key={i}
+                    insight={insight}
+                    index={i}
+                    onSeek={handleSeek}
+                    runId={savedRunId ?? null}
+                    goal={data.raw.meta.goal}
+                  />
                 ))}
                 {data.insights.length === 0 && (
                   <p className="text-xs col-span-2" style={{ color: "rgba(255,255,255,0.35)" }}>

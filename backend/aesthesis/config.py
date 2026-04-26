@@ -23,7 +23,7 @@ class AppConfig(BaseModel):
                     "/process_video_timeline against this.",
     )
     tribe_request_timeout_s: float = Field(
-        default_factory=lambda: float(os.getenv("TRIBE_REQUEST_TIMEOUT_S", "300"))
+        default_factory=lambda: float(os.getenv("TRIBE_REQUEST_TIMEOUT_S", "600"))
     )
     upload_dir: Path = Field(
         default_factory=lambda: Path(os.getenv("UPLOAD_DIR", "./uploads")).resolve()

@@ -174,7 +174,6 @@ export default function Home() {
         {state === "analyzing" && (
           <motion.div key="analyzing" variants={pageVariants} initial="initial" animate="animate" exit="exit" transition={pageTransition}>
             <AnalyzingView
-              videoFile={videoFile}
               onComplete={handleAnalyzeProgressComplete}
               error={analyzeError}
               onRetry={() => videoFile && launchAnalysis(videoFile, captureInputs?.goal ?? null)}

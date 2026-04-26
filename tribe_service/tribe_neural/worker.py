@@ -65,7 +65,7 @@ try:
         on_startup = startup
         on_shutdown = shutdown
         max_jobs = int(os.getenv("GPU_WORKER_MAX_JOBS", "1"))
-        job_timeout = int(os.getenv("TRIBE_JOB_TIMEOUT", "300"))
+        job_timeout = int(os.getenv("TRIBE_JOB_TIMEOUT", "600"))
         redis_settings = RedisSettings(
             host=os.getenv("REDIS_HOST", "localhost"),
             port=int(os.getenv("REDIS_PORT", "6379")),
