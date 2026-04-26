@@ -155,15 +155,24 @@ export default function BrainChart({ frames, insights, currentTime, onSeek }: Br
       ) ?? null)
     : null
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const handleClick = useCallback((data: any) => {
-    const t = data?.activePayload?.[0]?.payload?.t_s as number | undefined
-    if (t === undefined) return
+  // Recharts' onClick on <LineChart> only fires when the click hits an
+  // active data point — empty plot space silently does nothing. Handle the
+  // click on the wrapper div instead and convert the mouse X to a timestamp
+  // using the same plot geometry the popover positioning uses (line 82).
+  const handlePlotClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (containerWidth === 0 || maxTime === 0) return
+    const rect = e.currentTarget.getBoundingClientRect()
+    const offsetX = e.clientX - rect.left
+    const plotWidth = containerWidth - PLOT_LEFT - CHART_MARGIN_RIGHT
+    const plotX = offsetX - PLOT_LEFT
+    if (plotX < 0 || plotX > plotWidth) return  // outside the plot area
+    const t = Math.max(0, Math.min(maxTime, (plotX / plotWidth) * maxTime))
+    // Snap to insight start if the click lands inside an insight band.
     const hit = visibleInsights.find(
       (ins) => t >= ins.timestamp_range_s[0] && t <= ins.timestamp_range_s[1]
     )
     onSeek(hit ? hit.timestamp_range_s[0] : t)
-  }, [onSeek, visibleInsights])
+  }, [containerWidth, maxTime, onSeek, visibleInsights])
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const handleMouseMove = useCallback((data: any) => {
@@ -200,15 +209,18 @@ export default function BrainChart({ frames, insights, currentTime, onSeek }: Br
       </div>
 
       {/* Chart wrapper — overflow:visible so popover can escape the panel boundary */}
-      <div ref={containerRef} className="relative" style={{ overflow: "visible" }}>
+      <div
+        ref={containerRef}
+        className="relative"
+        style={{ overflow: "visible", cursor: activeInsight ? "pointer" : "crosshair" }}
+        onClick={handlePlotClick}
+      >
         <ResponsiveContainer width="100%" height={240}>
           <LineChart
             data={chartData}
             margin={{ top: 5, right: CHART_MARGIN_RIGHT, left: CHART_MARGIN_LEFT, bottom: 5 }}
-            onClick={handleClick}
             onMouseMove={handleMouseMove}
             onMouseLeave={() => setMouseTime(null)}
-            style={{ cursor: activeInsight ? "pointer" : "crosshair" }}
           >
             <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
             <XAxis

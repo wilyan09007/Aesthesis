@@ -29,6 +29,10 @@ export default function VideoPlayer({ file, currentTime, onTimeUpdate }: VideoPl
     if (!video || isSeekingRef.current) return
     if (Math.abs(video.currentTime - currentTime) > 0.2) {
       video.currentTime = currentTime
+      // Freeze on the requested frame so the UI at that moment is visible.
+      // The >0.2s gap tells us this seek is external (graph/insight click),
+      // not the per-frame timeupdate that fires during normal playback.
+      video.pause()
     }
   }, [currentTime])
 
