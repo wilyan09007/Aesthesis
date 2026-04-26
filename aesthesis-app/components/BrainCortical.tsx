@@ -38,12 +38,12 @@ const RIGHT_INFLATED = "/brain/fsaverage5-right-inflated.glb"
 const LEFT_PIAL = "/brain/fsaverage5-left-pial.glb"
 const RIGHT_PIAL = "/brain/fsaverage5-right-pial.glb"
 
-// Pre-warm both inflated GLBs as soon as this module imports. drei
-// `useGLTF.preload` triggers a fetch + parse off the critical render
-// path, so by the time the user reaches the Results page the geometry
-// is usually already in cache. Cheap insurance against first-paint pop.
-useGLTF.preload(LEFT_INFLATED)
-useGLTF.preload(RIGHT_INFLATED)
+// Pre-warm GLBs only when the brain panel actually mounts AND we have
+// parcel data to render. Calling `useGLTF.preload` at module top-level
+// fires the fetch on every page load (Next.js dev mode eagerly resolves
+// lazy() chunks), which produces a pair of 404s on every Landing page
+// view until the bake script has run. Triggering it inside a useEffect
+// inside the active branch keeps the network tab clean.
 
 interface BrainCorticalProps {
   /** (n_TRs, 400) Schaefer-400 z-scored activations. Null => fallback. */
@@ -271,6 +271,12 @@ export default function BrainCortical({
         n_parcels: parcelSeries[0]?.length ?? 0,
         variant,
       })
+      // Preload only when we have data to render. Avoids spurious 404s
+      // on Landing-page loads when the bake script hasn't run yet.
+      const left = variant === "inflated" ? LEFT_INFLATED : LEFT_PIAL
+      const right = variant === "inflated" ? RIGHT_INFLATED : RIGHT_PIAL
+      useGLTF.preload(left)
+      useGLTF.preload(right)
     }
   }, [useFallback, parcelSeries, variant])
 
