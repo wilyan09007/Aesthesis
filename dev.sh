@@ -3,14 +3,14 @@
 #
 # Three layers:
 #   - TRIBE     (Modal serverless at $TRIBE_SERVICE_URL)  — tribe_service/modal_app.py
-#   - backend   (FastAPI, http://127.0.0.1:8000)          — backend/aesthesis/main.py
-#   - frontend  (Next.js, http://localhost:3000)          — frontend/
+#   - aesthesis_app   (FastAPI, http://127.0.0.1:8000)          — aesthesis_app/aesthesis/main.py
+#   - aesthesis-app  (Next.js, http://localhost:3000)          — aesthesis-app/
 #
 # Modal note: TRIBE doesn't run locally and isn't "started" by this script.
 # Once `modal deploy tribe_service/modal_app.py` has been run, the app sits
 # in Modal's cloud forever — scales to zero containers when idle, spins one
 # up on the next HTTP request to $TRIBE_SERVICE_URL/process_video_timeline,
-# tears it down after ~5 min idle. The local backend just hits the URL like
+# tears it down after ~5 min idle. The local aesthesis_app just hits the URL like
 # any other API. So this script only verifies the deployed URL responds; it
 # does NOT push code or hold a local process for Modal. Re-deploy manually
 # whenever you change tribe_service/:
@@ -32,7 +32,7 @@ else
 fi
 
 # ── TRIBE health check ──────────────────────────────────────────────────────
-# Verify the deployed TRIBE responds. The backend will fail every
+# Verify the deployed TRIBE responds. The aesthesis_app will fail every
 # /api/analyze if this URL is unreachable, so catching it here gives a
 # clearer error than waiting for the first user request to bounce.
 #
@@ -62,16 +62,16 @@ fi
 # uvicorn will run the real import and log it once when the server starts.
 if ! python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('aesthesis.main') else 1)" 2>/dev/null; then
     echo "[dev] backend package not installed; running 'pip install -e backend/'…"
-    pip install -e backend/ >/dev/null
+    pip install -e aesthesis_app/ >/dev/null
 fi
 
-if [[ ! -d frontend/node_modules ]]; then
+if [[ ! -d aesthesis-app/node_modules ]]; then
     echo "[dev] frontend deps missing; running 'npm install'…"
-    (cd frontend && npm install)
+    (cd aesthesis-app && npm install)
 fi
 
 # Refuse to start if either port is already in use. Avoids the confusing
-# "frontend silently exits because :3000 is taken" failure mode (Next.js
+# "aesthesis-app silently exits because :3000 is taken" failure mode (Next.js
 # detects the conflict and exits with code 0, which looks like success).
 if curl -sS --max-time 1 -o /dev/null http://127.0.0.1:8000/health 2>/dev/null; then
     echo "[dev] ERROR: something is already serving on :8000 — stop it first." >&2
@@ -108,7 +108,7 @@ python -m uvicorn aesthesis.main:app --host 127.0.0.1 --port 8000 &
 PIDS+=($!)
 
 echo "[dev] starting frontend → http://localhost:3000"
-(cd frontend && npm run dev) &
+(cd aesthesis-app && npm run dev) &
 PIDS+=($!)
 
 echo "[dev] both up. Ctrl-C to stop both."

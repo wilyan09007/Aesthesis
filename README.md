@@ -33,7 +33,7 @@ modal deploy modal_app.py
 # → records the URL like https://your-org--aesthesis-tribe-process-video-timeline.modal.run
 
 # Run Aesthesis app
-cd backend
+cd aesthesis_app
 export TRIBE_SERVICE_URL=https://your-org--aesthesis-tribe-process-video-timeline.modal.run
 export GEMINI_API_KEY=<your-google-key>
 uvicorn aesthesis.main:app --port 8000

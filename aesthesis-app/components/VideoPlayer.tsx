@@ -7,11 +7,16 @@ interface VideoPlayerProps {
   file: File | null
   currentTime: number
   onTimeUpdate: (t: number) => void
+  // Fires once the browser has decoded enough of the file to know its
+  // intrinsic duration. Source of truth for "how long is this video"
+  // — backend's reported duration_s can drift after audio strip / TR
+  // padding.
+  onDuration?: (d: number) => void
 }
 
 const ACCENT = "#7C9CFF"
 
-export default function VideoPlayer({ file, currentTime, onTimeUpdate }: VideoPlayerProps) {
+export default function VideoPlayer({ file, currentTime, onTimeUpdate, onDuration }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const isSeekingRef = useRef(false)
   const objectUrl = useRef<string | null>(null)
@@ -79,6 +84,10 @@ export default function VideoPlayer({ file, currentTime, onTimeUpdate }: VideoPl
             onTimeUpdate={handleTimeUpdate}
             onSeeking={handleSeeking}
             onSeeked={() => { isSeekingRef.current = false }}
+            onLoadedMetadata={(e) => {
+              const d = (e.currentTarget as HTMLVideoElement).duration
+              if (Number.isFinite(d) && d > 0) onDuration?.(d)
+            }}
           />
         ) : (
           <div className="w-full h-full flex items-center justify-center">

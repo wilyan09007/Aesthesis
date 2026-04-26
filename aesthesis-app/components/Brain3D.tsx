@@ -72,16 +72,55 @@ function BrainMesh({ roiValues }: BrainMeshProps) {
   const currentEmissive = useRef(new THREE.Color(0.05, 0.1, 0.28))
 
   const geometry = useMemo(() => {
-    const geo = new THREE.IcosahedronGeometry(1.5, 2)
+    // detail=4 (5120 faces) is needed so the gyri displacement reads as
+    // crinkled folds rather than coarse facets.
+    const geo = new THREE.IcosahedronGeometry(1.4, 4)
     const pos = geo.attributes.position
+    const v = new THREE.Vector3()
+
     for (let i = 0; i < pos.count; i++) {
-      const x = pos.getX(i)
-      const y = pos.getY(i)
-      const z = pos.getZ(i)
-      const noise = 0.1 * Math.sin(x * 3.1 + y * 2.3) * Math.cos(y * 2.7 + z * 1.9) + 0.05 * Math.sin(z * 4.1 + x * 1.7)
-      const len = Math.sqrt(x * x + y * y + z * z)
-      const scale = (len + noise) / len
-      pos.setXYZ(i, x * scale, y * scale, z * scale)
+      v.fromBufferAttribute(pos, i)
+
+      // 1) Brain proportions — slightly narrower side-to-side, longer
+      //    front-to-back. Bottom half is flatter than the top so the
+      //    cerebrum domes up the way a real brain sits on its base.
+      v.x *= 0.95
+      v.y *= v.y > 0 ? 0.95 : 0.65
+      v.z *= 1.20
+
+      // 2) Cerebellum (bilateral bumps at the back-bottom) + brainstem
+      //    (single small protrusion below the cerebellum). Gaussians
+      //    centered at the anatomical positions; widths set so the
+      //    bumps stay localized.
+      const cerebL = Math.exp(-((v.x + 0.4) ** 2 * 6 + (v.y + 0.45) ** 2 * 4 + (v.z + 0.75) ** 2 * 4))
+      const cerebR = Math.exp(-((v.x - 0.4) ** 2 * 6 + (v.y + 0.45) ** 2 * 4 + (v.z + 0.75) ** 2 * 4))
+      const stem   = Math.exp(-(v.x ** 2 * 14 + (v.y + 0.85) ** 2 * 7 + (v.z + 0.30) ** 2 * 5))
+      const bumps  = 0.20 * (cerebL + cerebR) + 0.14 * stem
+
+      // 3) Gyri — layered sines for the crinkly cerebral-cortex surface.
+      const gyri =
+        0.07 * Math.sin(v.x * 6.5 + v.z * 5.3) * Math.cos(v.y * 5.5) +
+        0.05 * Math.sin(v.y * 7.7 + v.x * 4.2) * Math.cos(v.z * 7.5) +
+        0.03 * Math.sin(v.z * 9.3 + v.y * 5.7)
+
+      // Push outward along the surface normal by bumps + gyri.
+      let dir = v.clone().normalize()
+      v.copy(dir.multiplyScalar(v.length() + bumps + gyri))
+
+      // 4) Longitudinal fissure — the deep cleft splitting left/right
+      //    hemispheres. Apply *after* the bumps so it actually cuts
+      //    through the cerebrum surface (not just before it). Pull
+      //    inward along the (new) normal where the vertex is near the
+      //    centerline, on the top half.
+      const fissCenter = Math.exp(-v.x * v.x * 18)            // narrow X band
+      const fissZ      = Math.exp(-v.z * v.z * 0.3)           // mild front-back taper
+      const fissY      = Math.max(0, (v.y + 0.1) / 1.0)       // mostly top, slight wrap
+      const fissure    = 0.32 * fissCenter * fissZ * fissY
+
+      dir = v.clone().normalize()
+      v.copy(dir.multiplyScalar(v.length() - fissure))
+
+      pos.setXYZ(i, v.x, v.y, v.z)
     }
     geo.computeVertexNormals()
     return geo
@@ -115,18 +154,16 @@ function BrainMesh({ roiValues }: BrainMeshProps) {
 
   return (
     <group>
-      {/* Core mesh */}
+      {/* Core mesh — opaque so the gyri shadows actually read as folds. */}
       <mesh ref={meshRef} geometry={geometry} castShadow>
         <meshStandardMaterial
           ref={matRef}
           color={new THREE.Color(0.18, 0.28, 0.55)}
           emissive={new THREE.Color(0.05, 0.1, 0.28)}
-          emissiveIntensity={0.5}
-          transparent
-          opacity={0.82}
-          roughness={0.65}
-          metalness={0.1}
-          wireframe={false}
+          emissiveIntensity={0.45}
+          roughness={0.78}
+          metalness={0.05}
+          flatShading={false}
         />
       </mesh>
 
@@ -165,9 +202,11 @@ export default function Brain3D({ roiValues, size }: Brain3DProps) {
         gl={{ antialias: true, alpha: true }}
         style={{ background: "transparent" }}
       >
-        <ambientLight intensity={0.2} />
-        <directionalLight position={[3, 3, 3]} intensity={0.6} color="#a0b8ff" />
-        <directionalLight position={[-3, -2, -3]} intensity={0.3} color="#5CF2C5" />
+        {/* Lower ambient + higher-contrast key light = gyri shadows that
+            actually read as folds rather than smooth bumps. */}
+        <ambientLight intensity={0.12} />
+        <directionalLight position={[3, 4, 3]} intensity={0.95} color="#a0b8ff" />
+        <directionalLight position={[-3, -2, -3]} intensity={0.25} color="#5CF2C5" />
         <BrainMesh roiValues={roiValues} />
         {/* Rotate is the interaction that makes the brain feel alive. Pan/zoom
             are intentionally off — they'd let the user lose the brain off-screen

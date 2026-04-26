@@ -1,4 +1,4 @@
-# Aesthesis app backend dependencies.
+# Aesthesis app aesthesis_app dependencies.
 # CPU-only — orchestrator HTTP-talks to the GPU TRIBE service.
 
 # Service plumbing

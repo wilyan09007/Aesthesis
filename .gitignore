@@ -44,11 +44,14 @@ modal-secrets.toml
 .env.local
 .env.*.local
 
+# Next.js build output (per-app, can land at any depth)
+.next/
+
 # Claude Code session data
 .claude/
 
 # Per-request upload dirs (runtime artifacts, never commit)
-backend/uploads/
+aesthesis_app/uploads/
 
 # Test videos (too large for git; commit-ignored even if present in worktree)
 *.mp4

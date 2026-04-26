@@ -27,6 +27,10 @@ interface BrainChartProps {
   insights?: Insight[]
   currentTime: number
   onSeek: (t: number) => void
+  // Actual video duration in seconds. The frame timestamps are quantized
+  // to TR boundaries (i * tr_duration_s) and can extend past the real
+  // video end — without this, the X-axis runs longer than the video.
+  durationS?: number
 }
 
 interface ChartDataPoint {
@@ -128,7 +132,7 @@ function InsightPopover({ insight, containerWidth, maxTime, onSeek }: {
   )
 }
 
-export default function BrainChart({ frames, insights, currentTime, onSeek }: BrainChartProps) {
+export default function BrainChart({ frames, insights, currentTime, onSeek, durationS }: BrainChartProps) {
   const [activeKey, setActiveKey] = useState<string | null>(null)
   const [mouseTime, setMouseTime] = useState<number | null>(null)
   const [containerWidth, setContainerWidth] = useState(0)
@@ -144,8 +148,13 @@ export default function BrainChart({ frames, insights, currentTime, onSeek }: Br
     return () => ro.disconnect()
   }, [])
 
-  const chartData = buildChartData(frames)
-  const maxTime = frames.length > 0 ? frames[frames.length - 1].t_s : 0
+  // Cap chart data + axis at the actual video duration, then round the
+  // axis end to the nearest whole second so the rightmost tick label is
+  // a clean integer.
+  const lastFrameT = frames.length > 0 ? frames[frames.length - 1].t_s : 0
+  const rawMaxTime = durationS && durationS > 0 ? Math.min(lastFrameT, durationS) : lastFrameT
+  const maxTime = Math.round(rawMaxTime)
+  const chartData = buildChartData(frames).filter((p) => p.t_s <= maxTime)
 
   const visibleInsights = insights ?? []
 

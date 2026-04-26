@@ -1,5 +1,5 @@
 """Tests for `output_builder.build_response` — the pure assembly function
-that produces the final `AnalyzeResponse` JSON for the frontend.
+that produces the final `AnalyzeResponse` JSON for the aesthesis-app.
 
 Single-video pivot (DESIGN.md §17): no A/B split. These tests build a
 synthetic timeline + events + insights + metrics + assessment, run the

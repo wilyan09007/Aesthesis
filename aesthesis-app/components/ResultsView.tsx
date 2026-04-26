@@ -39,6 +39,11 @@ function getCurrentROI(frames: Frame[], currentTime: number): ROIValues | undefi
 
 export default function ResultsView({ data, videoFile, onReset, savedRunId, saveStatus = "idle", onSave, onHistoryOpen, onAgentOpen }: ResultsViewProps) {
   const [currentTime, setCurrentTime] = useState(0)
+  // Real video duration as reported by the <video> element. Source of
+  // truth for the chart x-axis — backend's data.duration_s can drift
+  // (TR padding, audio strip). Falls back to data.duration_s while the
+  // video element is still loading metadata.
+  const [videoDuration, setVideoDuration] = useState<number | null>(null)
   const currentROI = useMemo(() => getCurrentROI(data.frames, currentTime), [data.frames, currentTime])
 
   // Map currentTime → TR index for the cortical brain. Clamped to the
@@ -54,6 +59,14 @@ export default function ResultsView({ data, videoFile, onReset, savedRunId, save
   }, [currentTime, data.tr_duration_s, data.parcel_series])
 
   const handleSeek = (t: number) => setCurrentTime(t)
+  const chartDuration = videoDuration ?? data.duration_s
+
+  // Drop insights whose start timestamp lies past the video end — those
+  // are TR-padding artifacts from the analysis pipeline, not real moments.
+  const insights = useMemo(() => {
+    if (!chartDuration || chartDuration <= 0) return data.insights
+    return data.insights.filter((ins) => ins.timestamp_range_s[0] < chartDuration)
+  }, [data.insights, chartDuration])
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -176,6 +189,7 @@ export default function ResultsView({ data, videoFile, onReset, savedRunId, save
               file={videoFile}
               currentTime={currentTime}
               onTimeUpdate={handleSeek}
+              onDuration={setVideoDuration}
             />
 
             {/* Brain 3D — its own panel, square, drag-to-rotate. */}
@@ -227,9 +241,10 @@ export default function ResultsView({ data, videoFile, onReset, savedRunId, save
           >
             <BrainChart
               frames={data.frames}
-              insights={data.insights}
+              insights={insights}
               currentTime={currentTime}
               onSeek={handleSeek}
+              durationS={chartDuration}
             />
           </motion.section>
 
@@ -246,11 +261,11 @@ export default function ResultsView({ data, videoFile, onReset, savedRunId, save
                 <div className="w-2 h-2 rounded-full" style={{ background: "#7C9CFF" }} />
                 <h3 className="text-sm font-medium" style={{ color: "#e8eaf0" }}>Timestamped insights</h3>
                 <span className="ml-auto text-[10px] tracking-wide" style={{ color: "rgba(255,255,255,0.3)" }}>
-                  {data.insights.length} moment{data.insights.length === 1 ? "" : "s"}
+                  {insights.length} moment{insights.length === 1 ? "" : "s"}
                 </span>
               </div>
               <div className="grid grid-cols-2 gap-3 items-start">
-                {data.insights.map((insight, i) => (
+                {insights.map((insight, i) => (
                   <InsightCard
                     key={i}
                     insight={insight}
@@ -260,7 +275,7 @@ export default function ResultsView({ data, videoFile, onReset, savedRunId, save
                     goal={data.raw.meta.goal}
                   />
                 ))}
-                {data.insights.length === 0 && (
+                {insights.length === 0 && (
                   <p className="text-xs col-span-2" style={{ color: "rgba(255,255,255,0.35)" }}>
                     No notable moments detected. The demo may be too short or too uniform.
                   </p>
