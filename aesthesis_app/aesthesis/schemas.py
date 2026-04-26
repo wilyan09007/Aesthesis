@@ -105,6 +105,14 @@ class TimelineSummary(BaseModel):
     #:
     #: Wire size: ~32 KB for a 30s clip (20 TRs × 400 floats × 4 bytes).
     parcel_series: list[list[float]] | None = None
+    #: Per-face uint8 RGB color stream (Meta-style). Shape per hemisphere:
+    #: (n_TRs, 20480, 3). The frontend's WebGL shader samples this
+    #: directly. Format spec matches Meta's reverse-engineered demo wire
+    #: format exactly. See tribe_service/tribe_neural/steps/step2c_face_colors.py.
+    #:
+    #: Wire size: ~3.3 MB base64 for a 30s clip (matches Meta's ~2.9 MB
+    #: zip per clip).
+    face_colors: dict | None = None
 
 
 class AnalyzeRequestMeta(BaseModel):

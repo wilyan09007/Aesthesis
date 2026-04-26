@@ -29,6 +29,7 @@ from .init_resources import Resources
 from .logging_config import timed_step
 from .steps.step2_roi import extract_all
 from .steps.step2b_parcels import extract_parcels
+from .steps.step2c_face_colors import extract_face_colors
 from .steps.step7_timeline import build_timeline
 from .validation import PipelineError, ValidationError
 
@@ -120,6 +121,18 @@ def process_video_timeline(
         # Attach parcel_series to the payload alongside roi_series. None
         # is allowed — schemas.py marks the field Optional.
         payload["parcel_series"] = parcel_series
+
+        # ── Step 2c: per-face uint8 RGB color stream (Meta-style) ──
+        # Pre-baked colormap output ready for the WebGL shader to sample
+        # directly. Format spec matches Meta's TRIBE v2 demo wire format
+        # exactly — see step2c_face_colors.py docstring.
+        with timed_step(log, "face_colors", **log_extra) as ctx:
+            face_colors = extract_face_colors(preds)
+            ctx["lh_kb"] = round(
+                len(face_colors["left"]["data_b64"]) / 1024, 1)
+            ctx["rh_kb"] = round(
+                len(face_colors["right"]["data_b64"]) / 1024, 1)
+        payload["face_colors"] = face_colors
     except (ValidationError, PipelineError):
         raise
     except Exception as e:  # noqa: BLE001

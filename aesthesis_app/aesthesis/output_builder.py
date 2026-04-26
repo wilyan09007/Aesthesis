@@ -63,6 +63,15 @@ def _summarize_timeline(timeline: dict) -> TimelineSummary:
                    "n_parcels": len(parcel_series[0]) if parcel_series else 0},
         )
 
+    face_colors = timeline.get("face_colors")
+    if face_colors is not None:
+        log.debug(
+            "timeline carries face_colors",
+            extra={"step": "output",
+                   "lh_kb": round(len(face_colors["left"]["data_b64"]) / 1024, 1),
+                   "rh_kb": round(len(face_colors["right"]["data_b64"]) / 1024, 1)},
+        )
+
     return TimelineSummary(
         n_trs=int(timeline.get("n_trs", 0)),
         tr_duration_s=float(timeline.get("tr_duration_s", 1.5)),
@@ -71,6 +80,7 @@ def _summarize_timeline(timeline: dict) -> TimelineSummary:
         windows=timeline.get("windows", []),
         processing_time_ms=float(timeline.get("processing_time_ms", 0.0)),
         parcel_series=parcel_series,
+        face_colors=face_colors,
     )
 
 
