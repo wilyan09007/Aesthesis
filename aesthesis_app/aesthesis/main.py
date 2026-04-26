@@ -35,8 +35,8 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from .capture import runner as capture_runner
 from .capture.protocol import (
-    AnalyzeByRunRequest, CachedDemoEntry,
-    RunRequest, RunStartedResponse,
+    AnalyzeByRunRequest, CachedDemoEntry, PrewarmRequest,
+    RunRequest, RunStartedResponse, StartCaptureRequest,
 )
 from .config import AppConfig, get_config
 from .logging_config import configure_logging, get_logger
@@ -190,27 +190,29 @@ async def analyze(
 
 @app.post("/api/run", response_model=RunStartedResponse)
 async def start_capture_run(req: RunRequest) -> RunStartedResponse:
-    """Start a Phase 2 capture run (DESIGN.md §§4.1, 4.2, 4.2b).
+    """Legacy one-shot capture (DESIGN.md §§4.1, 4.2, 4.2b).
 
-    Spawns the BrowserUse subprocess, returns immediately with a run_id.
+    Spawns the BrowserUse subprocess and auto-sends the start command
+    as soon as pre-warm completes. Returns the run_id immediately.
     Frontend connects to ``ws://.../api/stream/{run_id}`` to receive
-    live JPEG frames as binary WS messages and lifecycle events as JSON
-    control messages. On ``capture_complete``, fetch the MP4 via
-    ``GET /api/run/{run_id}/video`` and call
-    ``POST /api/analyze/by-run/{run_id}``.
+    live frames + lifecycle events.
+
+    For the lower-latency two-phase flow (pre-warm on capture-screen
+    mount, fire start on user click), use ``POST /api/prewarm`` +
+    ``POST /api/run/{run_id}/start`` instead.
 
     D19: caps active captures at 1 per backend instance. Second concurrent
-    request gets 409 with the active run_id in the body.
+    request gets 409.
     """
     cfg = get_config()
     log.info(
-        "/api/run received",
+        "/api/run received (legacy one-shot path)",
         extra={"step": "endpoint", "url": str(req.url),
                "goal_present": req.goal is not None,
                "n_cookies": len(req.auth.cookies) if (req.auth and req.auth.cookies) else 0},
     )
     try:
-        runner = await capture_runner.start_run(req, cfg=cfg)
+        runner = await capture_runner.start_run(req, cfg=cfg, prewarm_only=False)
     except capture_runner.CaptureInProgressError as e:
         log.warning("/api/run rejected — capture in progress",
                     extra={"step": "endpoint", "active_run_id": e.active_run_id})
@@ -222,6 +224,91 @@ async def start_capture_run(req: RunRequest) -> RunStartedResponse:
         ) from e
 
     return RunStartedResponse(run_id=runner.run_id)
+
+
+@app.post("/api/prewarm", response_model=RunStartedResponse)
+async def prewarm_capture(_req: PrewarmRequest | None = None) -> RunStartedResponse:
+    """Phase 2 pre-warm (the two-phase capture flow's first call).
+
+    Spawns the BrowserUse subprocess in stand-by mode: launches Chromium,
+    starts CDP screencast, constructs the LLM client, opens a stand-by
+    HTML page so the user has SOMETHING to see while filling the form.
+    Returns the run_id immediately.
+
+    The frontend should call this on Capture-screen mount, open the
+    WebSocket at ``ws://.../api/stream/{run_id}``, watch for the
+    ``prewarm_ready`` lifecycle event to know the Start button is
+    armed, then call ``POST /api/run/{run_id}/start`` when the user
+    actually clicks Start. The wall-clock D1 timer doesn't begin until
+    that start call — pre-warm is "free" budget-wise.
+
+    D19: caps active captures at 1 per backend instance. If user
+    abandons the pre-warm (navigates away from /capture), D27's 3-second
+    WS-empty grace window kicks in and the subprocess is SIGKILLed
+    automatically.
+    """
+    cfg = get_config()
+    log.info("/api/prewarm received", extra={"step": "endpoint"})
+    try:
+        runner = await capture_runner.start_run(None, cfg=cfg, prewarm_only=True)
+    except capture_runner.CaptureInProgressError as e:
+        log.warning("/api/prewarm rejected — capture in progress",
+                    extra={"step": "endpoint", "active_run_id": e.active_run_id})
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "capture_in_progress",
+                    "active_run_id": e.active_run_id,
+                    "message": str(e)},
+        ) from e
+    return RunStartedResponse(run_id=runner.run_id)
+
+
+@app.post("/api/run/{run_id}/start", response_model=RunStartedResponse)
+async def start_prewarmed_capture(run_id: str, req: StartCaptureRequest) -> RunStartedResponse:
+    """Trigger a pre-warmed subprocess to begin its actual capture.
+
+    Frontend calls this on the user's Start Capture click, after
+    ``POST /api/prewarm`` has returned and the WebSocket has received
+    a ``prewarm_ready`` lifecycle event. Body carries the URL + goal
+    (and optional cookies) that get forwarded to the subprocess via
+    stdin in one JSON line.
+
+    Returns 404 if the run_id is unknown or the subprocess has already
+    advanced past pre-warm (e.g., the user double-clicked or the
+    subprocess crashed).
+    """
+    log.info(
+        "/api/run/{id}/start received",
+        extra={"step": "endpoint", "run_id": run_id, "url": str(req.url),
+               "goal_present": req.goal is not None,
+               "n_cookies": len(req.auth.cookies) if (req.auth and req.auth.cookies) else 0},
+    )
+    runner = capture_runner.get_runner(run_id)
+    if runner is None:
+        log.warning(
+            "/api/run/{id}/start: unknown run_id",
+            extra={"step": "endpoint", "run_id": run_id},
+        )
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "unknown_run_id", "run_id": run_id,
+                    "message": "no active pre-warmed run with this id — did /api/prewarm succeed first?"},
+        )
+
+    try:
+        await runner.start_capture(url=str(req.url), goal=req.goal, auth=req.auth)
+    except capture_runner.CaptureNotReadyError as e:
+        log.warning(
+            "/api/run/{id}/start rejected — runner not ready: %s", e,
+            extra={"step": "endpoint", "run_id": run_id, "phase": runner.phase},
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "not_ready", "run_id": run_id, "phase": runner.phase,
+                    "message": str(e)},
+        ) from e
+
+    return RunStartedResponse(run_id=run_id)
 
 
 @app.websocket("/api/stream/{run_id}")

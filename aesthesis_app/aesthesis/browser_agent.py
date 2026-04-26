@@ -1,40 +1,44 @@
 """Browser-agent subprocess entry — `python -m aesthesis.browser_agent`.
 
-This is the load-bearing one-shot binary the parent (`capture.runner`)
-spawns per capture run. It owns:
+The load-bearing one-shot binary that ``capture.runner.CaptureRunner``
+spawns per capture run. Two-phase lifecycle:
 
-1. Playwright Chromium launch with ``--remote-debugging-port=PORT`` so
-   BrowserUse can attach via ``BrowserSession(cdp_url=...)`` (the only
-   coexistence pattern that works for both recording and agent-driving;
-   see ASSUMPTIONS.md research log entries A1, A2, A3).
+PHASE 1 — pre-warm (fires immediately on spawn):
 
-2. Cookie injection (D31 cookies-only auth) before page navigation.
+  1. Launch Playwright Chromium with ``--remote-debugging-port=PORT``
+     so browser-use can attach via ``Browser(cdp_url=...)`` (the only
+     coexistence pattern that lets us record AND drive the same tab;
+     see ASSUMPTIONS_PHASE2_CAPTURE.md A2).
+  2. Open a stand-by page (data: URL with a friendly "ready" message).
+  3. Open CDP session, instantiate ``capture.streamer.AdaptiveStreamer``,
+     start screencast — frames begin flowing to stdout immediately so
+     the frontend can render the live panel.
+  4. Construct ``ChatGoogle`` LLM (validates GEMINI_API_KEY, primes
+     the genai HTTPS connection).
+  5. Emit ``{"type": "prewarm_ready", "run_id": ..., "cdp_port": ...}``
+     on stdout.
+  6. Wait for stdin: a single JSON line specifying the actual capture
+     parameters (``url``, ``goal``, optional ``cookies``).
 
-3. CDP screencast via ``capture.streamer.AdaptiveStreamer`` — emits
-   each JPEG frame to stdout as JSONL AND stashes raw bytes for the
-   MP4 stitch step. Single source of truth for both live UX and the
-   archived recording.
+PHASE 2 — capture (fires when stdin start command arrives):
 
-4. BrowserUse ``Agent.run()`` wrapped in an ``asyncio.wait`` race
-   against a 30-second recording-cap timer (D7). Whichever finishes
-   first ends the run. The OUTER 90-second wall-clock SIGKILL is the
-   parent's job (D1) and never touches this process — we just trust
-   it as the final safety net.
+  7. Inject cookies (D31 auth) onto the existing context.
+  8. Navigate the page to the target URL.
+  9. Construct ``Agent(task, llm, browser=Browser(cdp_url=...))``.
+ 10. Race ``agent.run()`` against ``capture_recording_cap_s`` (D7).
+ 11. Stop screencast; ffmpeg-stitch JPEG frames into H.264 MP4
+     (validation.py:92 hard-requires h264; see A3).
+ 12. Write BrowserUse action history to ``actions.jsonl`` (D15).
+ 13. Emit ``capture_complete`` JSONL, exit 0.
 
-5. ffmpeg-stitch the stashed JPEGs into an H.264 MP4 (validation.py:92
-   hard-requires h264) at ``{run_dir}/video.mp4``.
+Sad path: at any point, emit ``capture_failed`` with a typed reason
+(``timeout``, ``crashed``, ``navigation_error``, ``setup_error``) and
+exit 1. Never swallow — tests fail loudly per project memory
+``feedback_no_mocks``.
 
-6. Write BrowserUse action history to ``{run_dir}/actions.jsonl`` so
-   the orchestrator can stamp ``Event.agent_action_at_t`` per D15.
-
-7. Emit a final ``capture_complete`` JSONL line on stdout, exit 0.
-   On any structural failure: emit ``capture_failed`` with a typed
-   reason and exit 1. Never swallow; tests fail loudly per project
-   memory ``feedback_no_mocks``.
-
-All logging goes to stderr (parent reads stdout for protocol). Verbose
-structured logs at every state transition — this subprocess is the
-hardest part to debug after the fact.
+Stdout = protocol (the parent reads JSONL line-by-line). Stderr =
+human/log output (parent forwards to backend log with run_id
+correlation).
 """
 
 from __future__ import annotations
@@ -49,6 +53,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -61,6 +66,34 @@ from .logging_config import configure_logging
 log = logging.getLogger("aesthesis.browser_agent")
 
 
+# Stand-by HTML shown before the user clicks Start. data: URL keeps it
+# self-contained; no network fetch needed.
+_STANDBY_HTML = """\
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Aesthesis — ready</title>
+<style>
+  html,body{margin:0;height:100%;background:#0B0F14;color:#7C9CFF;
+    font-family:ui-sans-serif,system-ui,sans-serif;display:flex;
+    align-items:center;justify-content:center}
+  .wrap{text-align:center;padding:32px}
+  .pulse{width:14px;height:14px;border-radius:50%;background:#5CF2C5;
+    margin:0 auto 16px;animation:p 1.4s ease-in-out infinite}
+  h1{font-weight:300;font-size:28px;margin:0 0 8px;color:#e8eaf0;
+    letter-spacing:-0.01em}
+  p{color:rgba(255,255,255,0.45);font-size:14px;margin:0}
+  @keyframes p{0%,100%{opacity:.4;transform:scale(.95)}50%{opacity:1;
+    transform:scale(1.1)}}
+</style></head>
+<body><div class="wrap"><div class="pulse"></div>
+<h1>Browser ready</h1><p>Configure capture and click Start.</p>
+</div></body></html>
+"""
+_STANDBY_DATA_URL = (
+    "data:text/html;charset=utf-8,"
+    + _STANDBY_HTML.replace("\n", "").replace(" ", "%20")
+)
+
+
 # ─── Argv & logging setup ──────────────────────────────────────────────────
 
 
@@ -68,20 +101,23 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="aesthesis.browser_agent",
         description=(
-            "One-shot subprocess: drive a URL with BrowserUse while "
-            "recording a CDP screencast to an MP4."
+            "Two-phase capture subprocess: pre-warm Chromium + CDP screencast "
+            "+ ChatGoogle, wait for stdin start command, then drive a URL "
+            "with BrowserUse and produce an H.264 MP4."
         ),
     )
-    p.add_argument("--url", required=True, help="page to navigate")
-    p.add_argument("--goal", default=None, help="goal-parameterized agent task; default = generic first-impression")
-    p.add_argument("--run-dir", required=True, type=Path, help="working dir for video.mp4 + actions.jsonl")
-    p.add_argument("--max-recording-s", type=float, default=30.0, help="hard recording cap (D7)")
-    p.add_argument("--headless", type=int, default=1, choices=(0, 1), help="chromium headless mode")
-    p.add_argument("--browseruse-model", default="gemini-2.5-pro", help="Gemini model name for BrowserUse Agent")
-    p.add_argument("--auth-cookies-file", type=Path, default=None, help="JSON file: list of CookieSpec dicts to set before navigation")
-    p.add_argument("--run-id", required=True, help="opaque ID for log correlation; matches parent's run_id")
-    p.add_argument("--viewport-width", type=int, default=1280, help="chromium viewport width")
-    p.add_argument("--viewport-height", type=int, default=720, help="chromium viewport height")
+    p.add_argument("--run-dir", required=True, type=Path,
+                   help="working dir for video.mp4 + actions.jsonl")
+    p.add_argument("--run-id", required=True,
+                   help="opaque ID for log correlation; matches parent's run_id")
+    p.add_argument("--max-recording-s", type=float, default=30.0,
+                   help="hard inner cap on the screencast portion (D7)")
+    p.add_argument("--headless", type=int, default=1, choices=(0, 1),
+                   help="chromium headless mode")
+    p.add_argument("--browseruse-model", default="gemini-2.5-pro",
+                   help="Gemini model name for the BrowserUse Agent LLM")
+    p.add_argument("--viewport-width", type=int, default=1280)
+    p.add_argument("--viewport-height", type=int, default=720)
     return p.parse_args()
 
 
@@ -117,15 +153,48 @@ def _emit_failed(run_id: str, reason: str, message: str) -> None:
     })
 
 
+# ─── Stdin reader (parent → subprocess command channel) ────────────────────
+#
+# asyncio support for reading the subprocess's own stdin is platform-specific
+# (Windows ProactorEventLoop has a long history of issues with stdin pipes).
+# We side-step that with a daemon thread that does blocking line reads on
+# sys.stdin and pushes complete lines onto an asyncio.Queue via
+# loop.call_soon_threadsafe — works the same everywhere.
+
+
+def _start_stdin_reader(loop: asyncio.AbstractEventLoop, queue: asyncio.Queue) -> threading.Thread:
+    """Start a daemon thread that pumps sys.stdin lines onto ``queue``."""
+
+    def _thread_main() -> None:
+        log.debug("stdin_reader: thread started")
+        try:
+            for raw in sys.stdin:
+                line = raw.strip()
+                if not line:
+                    continue
+                log.debug("stdin_reader: line received (%d chars)", len(line))
+                loop.call_soon_threadsafe(queue.put_nowait, line)
+        except Exception as e:  # noqa: BLE001 — thread death must not crash main
+            log.warning("stdin_reader: thread crashed: %s", e)
+        finally:
+            # Sentinel so the awaiter knows stdin is closed
+            loop.call_soon_threadsafe(queue.put_nowait, None)
+            log.debug("stdin_reader: thread exiting")
+
+    t = threading.Thread(target=_thread_main, daemon=True, name="stdin_reader")
+    t.start()
+    return t
+
+
 # ─── ffmpeg discovery + stitch ─────────────────────────────────────────────
 
 
 def _find_ffmpeg() -> str:
     """Return the absolute path to ffmpeg, or raise loudly.
 
-    ASSUMPTION (see ASSUMPTIONS.md A4): ffmpeg must be on PATH or
-    available via the ``imageio_ffmpeg`` bundled binary. If neither,
-    the build fails. No silent fallback to "skip MP4 encoding."
+    ASSUMPTION (see ASSUMPTIONS_PHASE2_CAPTURE.md A4): ffmpeg must be on PATH
+    or available via the ``imageio_ffmpeg`` bundled binary. If neither, the
+    build fails. No silent fallback to "skip MP4 encoding."
     """
     found = shutil.which("ffmpeg")
     if found:
@@ -159,16 +228,8 @@ def _encode_frames_to_mp4(
     """Stitch JPEG bytes into an H.264 MP4 via ffmpeg image2pipe.
 
     Returns ``(observed_duration_s, mp4_size_bytes)``. Raises loudly if
-    ffmpeg is missing or returns non-zero (tests must fail, per
-    project memory).
-
-    The duration is computed from the actual frame timestamps (last -
-    first), not from the nominal target FPS, so a tier-walked stream
-    produces an MP4 whose wall-clock duration matches what the user saw.
-    Frames are encoded at a constant 10 fps — variable framerate from
-    image2pipe is awkward; constant 10 fps slightly compresses time
-    when the source dropped below 10 fps, which is acceptable for a
-    30-second hackathon clip and documented in ASSUMPTIONS.md A5.
+    ffmpeg is missing or returns non-zero (tests must fail, per project
+    memory).
     """
     if not frames:
         raise RuntimeError(
@@ -190,9 +251,6 @@ def _encode_frames_to_mp4(
         },
     )
 
-    # Use image2pipe demuxer — JPEG bytes piped on stdin become frames.
-    # libx264 with veryfast preset + faststart for streamable MP4.
-    # yuv420p so consumer ffprobe + browsers accept it everywhere.
     cmd = [
         ffmpeg, "-y",
         "-f", "image2pipe",
@@ -203,21 +261,17 @@ def _encode_frames_to_mp4(
         "-preset", "veryfast",
         "-pix_fmt", "yuv420p",
         "-movflags", "+faststart",
-        "-an",  # no audio track — Aesthesis is video-only post-§17 audio strip
+        "-an",  # video-only (DESIGN.md §17 audio-strip-end-to-end)
         str(out_path),
     ]
-    log.debug("ffmpeg.cmd", extra={"step": "encode", "run_id": run_id, "cmd": " ".join(cmd)})
+    log.debug("ffmpeg.cmd", extra={"step": "encode", "run_id": run_id,
+                                    "cmd": " ".join(cmd)})
 
     t0 = time.perf_counter()
     proc = subprocess.Popen(  # noqa: S603 — ffmpeg path is shutil.which-validated
-        cmd,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
+        cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
     )
 
-    # Feed each JPEG. Catch BrokenPipeError (ffmpeg died early) and
-    # surface the real ffmpeg stderr so the user sees what went wrong.
     try:
         assert proc.stdin is not None
         for _ts, jpeg_bytes in frames:
@@ -255,20 +309,6 @@ def _encode_frames_to_mp4(
         },
     )
     return duration_s, size
-
-
-# ─── Cookie loading ────────────────────────────────────────────────────────
-
-
-def _load_auth(path: Path | None, *, run_id: str) -> AuthSpec | None:
-    if path is None:
-        return None
-    log.info("auth.load", extra={"step": "auth", "run_id": run_id, "path": str(path)})
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    auth = AuthSpec(**raw)
-    n_cookies = len(auth.cookies or [])
-    log.info("auth.loaded", extra={"step": "auth", "run_id": run_id, "n_cookies": n_cookies})
-    return auth
 
 
 # ─── Free-port helper (CDP --remote-debugging-port=PORT) ──────────────────
@@ -315,14 +355,9 @@ def _build_task_prompt(url: str, goal: str | None, max_seconds: float) -> str:
 def _build_llm(model_name: str, *, run_id: str):  # noqa: ANN202 — type from browser_use lazy-import
     """Construct browser-use's native ``ChatGoogle`` LLM wrapper.
 
-    browser-use 0.12.x ships its own LLM abstractions (``ChatGoogle``,
-    ``ChatOpenAI``, ``ChatAnthropic``, ``ChatBrowserUse``, ...) — we do
-    NOT use langchain. ``ChatGoogle`` wraps Google's official ``genai``
-    client directly and accepts ``api_key`` as a plain string.
-
-    We pull the key from ``GEMINI_API_KEY`` first (Aesthesis project
-    convention, used by the synthesizer too), then fall back to
-    ``GOOGLE_API_KEY`` (genai's default lookup name).
+    browser-use 0.12.x ships its own LLM abstractions — we do NOT use
+    langchain. ``ChatGoogle`` wraps Google's official ``genai`` client
+    directly and accepts ``api_key`` as a plain string.
     """
     from browser_use import ChatGoogle  # type: ignore
 
@@ -342,7 +377,7 @@ def _build_llm(model_name: str, *, run_id: str):  # noqa: ANN202 — type from b
     return ChatGoogle(
         model=model_name,
         api_key=api_key,
-        temperature=0.0,  # determinism beats creativity for an action-picker
+        temperature=0.0,
     )
 
 
@@ -354,20 +389,9 @@ def _serialise_action_history(agent: Any, *, run_id: str) -> list[dict]:
     ``agent.history``.
 
     Per browser_use/agent/service.py:435, ``Agent.__init__`` always sets
-    ``self.history = AgentHistoryList(history=[], usage=None)``. The
-    inner ``.history`` attribute is the list of per-step ``AgentHistory``
-    items (defined in browser_use/agent/views.py). We prefer
-    ``agent_steps()`` when it exists (curated per-step view), then fall
-    back to walking ``history.history`` directly. Each step is dumped via
-    Pydantic ``model_dump()`` when available, then ``str()`` as a final
-    fallback.
-
-    Per-step wall-clock timestamps aren't always exposed by browser-use,
-    so we use the step index as a deterministic ordering key. The
-    orchestrator's ±0.5s window in ``_nearest_action`` matches each step
-    against brain-event TR timestamps; with browser-use steps coming in
-    roughly real-time, index-as-second is a usable approximation for the
-    short captures we run (~30s).
+    ``self.history = AgentHistoryList(history=[], usage=None)``. Use the
+    canonical ``.agent_steps()`` view first, fall back to ``.history.history``,
+    dump each item via Pydantic ``model_dump()``.
     """
     history_list = getattr(agent, "history", None)
     if history_list is None:
@@ -378,17 +402,15 @@ def _serialise_action_history(agent: Any, *, run_id: str) -> list[dict]:
         )
         return []
 
-    # Prefer agent_steps() — the curated per-step view from AgentHistoryList
     steps = None
     if hasattr(history_list, "agent_steps") and callable(history_list.agent_steps):
         try:
             steps = history_list.agent_steps()
-        except Exception as e:  # noqa: BLE001 — defensive against API drift
+        except Exception as e:  # noqa: BLE001
             log.debug("agent.history.agent_steps_failed: %s", e,
                       extra={"step": "agent", "run_id": run_id})
             steps = None
 
-    # Fall back to the raw .history list
     if steps is None:
         steps = getattr(history_list, "history", None)
 
@@ -409,9 +431,6 @@ def _serialise_action_history(agent: Any, *, run_id: str) -> list[dict]:
 
     out: list[dict] = []
     for i, step in enumerate(steps):
-        # AgentHistory items are Pydantic models with state, model_output,
-        # and result fields. Dump to dict, then surface result or
-        # model_output as the human-readable description.
         if hasattr(step, "model_dump"):
             try:
                 dumped = step.model_dump()
@@ -428,42 +447,72 @@ def _serialise_action_history(agent: Any, *, run_id: str) -> list[dict]:
     return out
 
 
-# ─── Main async runner ─────────────────────────────────────────────────────
+# ─── Start command parsing (stdin) ─────────────────────────────────────────
 
 
-async def _run_capture(args: argparse.Namespace) -> None:
+class StartCommand:
+    """Parsed payload of the stdin start command."""
+
+    def __init__(self, url: str, goal: str | None, auth: AuthSpec | None):
+        self.url = url
+        self.goal = goal
+        self.auth = auth
+
+    @classmethod
+    def from_json_line(cls, line: str) -> "StartCommand":
+        payload = json.loads(line)
+        if payload.get("type") != "start":
+            raise ValueError(
+                f"expected stdin command type='start', got type={payload.get('type')!r}"
+            )
+        url = payload.get("url")
+        if not url or not isinstance(url, str):
+            raise ValueError(f"start command missing 'url' string field: {payload}")
+        goal = payload.get("goal")
+        auth_dict = payload.get("auth")
+        auth = AuthSpec(**auth_dict) if auth_dict else None
+        return cls(url=url, goal=goal, auth=auth)
+
+
+# ─── Main async runner — two-phase ────────────────────────────────────────
+
+
+async def _run_two_phase(args: argparse.Namespace) -> None:
+    """Phase 1: pre-warm. Phase 2: capture (gated on stdin)."""
     run_id = args.run_id
     run_dir: Path = args.run_dir
     run_dir.mkdir(parents=True, exist_ok=True)
-
-    auth = _load_auth(args.auth_cookies_file, run_id=run_id)
     cdp_port = _find_free_port()
 
     log.info(
         "agent.boot",
         extra={
             "step": "agent", "run_id": run_id,
-            "url": args.url, "goal_present": args.goal is not None,
+            "phase": "boot",
             "max_recording_s": args.max_recording_s,
             "headless": bool(args.headless),
             "browseruse_model": args.browseruse_model,
             "cdp_port": cdp_port,
             "viewport": [args.viewport_width, args.viewport_height],
-            "n_cookies": len(auth.cookies) if (auth and auth.cookies) else 0,
         },
     )
 
-    # Lazy imports — heavy deps stay out of `python -m aesthesis.browser_agent --help` path
     from playwright.async_api import async_playwright  # type: ignore
-    from browser_use import Agent, Browser  # type: ignore — Browser is the modern alias for BrowserSession
+    from browser_use import Agent, Browser  # type: ignore
 
     streamer: AdaptiveStreamer | None = None
     pw_ctx = None
     chromium = None
 
+    # Stdin queue + reader thread (cross-platform; see _start_stdin_reader docs)
+    loop = asyncio.get_running_loop()
+    stdin_queue: asyncio.Queue = asyncio.Queue()
+    _start_stdin_reader(loop, stdin_queue)
+
     try:
         async with async_playwright() as pw:
-            log.info("agent.playwright_launched", extra={"step": "agent", "run_id": run_id})
+            log.info("agent.playwright_launched",
+                     extra={"step": "agent", "run_id": run_id, "phase": "warming"})
             chromium = await pw.chromium.launch(
                 headless=bool(args.headless),
                 args=[
@@ -473,32 +522,25 @@ async def _run_capture(args: argparse.Namespace) -> None:
                     "--no-first-run",
                 ],
             )
-            log.info(
-                "agent.chromium_launched",
-                extra={"step": "agent", "run_id": run_id, "cdp_port": cdp_port},
-            )
+            log.info("agent.chromium_launched",
+                     extra={"step": "agent", "run_id": run_id,
+                            "phase": "warming", "cdp_port": cdp_port})
 
             pw_ctx = await chromium.new_context(
-                viewport={"width": args.viewport_width, "height": args.viewport_height},
+                viewport={"width": args.viewport_width,
+                          "height": args.viewport_height},
                 ignore_https_errors=False,
             )
 
-            if auth and auth.cookies:
-                cookie_dicts = [
-                    {k: v for k, v in c.model_dump().items() if v is not None}
-                    for c in auth.cookies
-                ]
-                await pw_ctx.add_cookies(cookie_dicts)
-                log.info("agent.cookies_injected",
-                         extra={"step": "agent", "run_id": run_id, "n_cookies": len(cookie_dicts)})
-
             page = await pw_ctx.new_page()
-            log.info("agent.page_opened", extra={"step": "agent", "run_id": run_id})
+            log.info("agent.page_opened",
+                     extra={"step": "agent", "run_id": run_id, "phase": "warming"})
 
-            # Open CDP session for the screencast. BrowserUse will get its
+            # Open CDP session for the screencast. browser-use will get its
             # own session via cdp_url — both can coexist on the same page.
             cdp_session = await pw_ctx.new_cdp_session(page)
-            log.info("agent.cdp_session_opened", extra={"step": "agent", "run_id": run_id})
+            log.info("agent.cdp_session_opened",
+                     extra={"step": "agent", "run_id": run_id, "phase": "warming"})
 
             streamer = AdaptiveStreamer(
                 cdp_session, run_id=run_id,
@@ -506,37 +548,107 @@ async def _run_capture(args: argparse.Namespace) -> None:
             )
             await streamer.start()
 
-            # Initial navigation. BrowserUse will take over after this but
-            # we navigate first so the streamer captures the initial paint.
-            log.info("agent.initial_nav_begin",
-                     extra={"step": "agent", "run_id": run_id, "url": args.url})
-            await page.goto(args.url, wait_until="domcontentloaded", timeout=15_000)
-            log.info("agent.initial_nav_done", extra={"step": "agent", "run_id": run_id})
+            # Navigate to stand-by page so the user has SOMETHING to look at
+            # while filling the form. data: URL = no network round-trip.
+            log.info("agent.standby_nav_begin",
+                     extra={"step": "agent", "run_id": run_id, "phase": "warming"})
+            await page.goto(_STANDBY_DATA_URL, wait_until="domcontentloaded",
+                            timeout=5_000)
+            log.info("agent.standby_nav_done",
+                     extra={"step": "agent", "run_id": run_id, "phase": "warming"})
 
-            # Build BrowserUse on top. Browser is the modern alias for
-            # BrowserSession (per browser_use/__init__.py:54). Connecting via
-            # cdp_url means BrowserUse attaches to the Chromium WE launched,
-            # rather than spawning its own — the only pattern that lets our
-            # CDP screencast and BrowserUse's agent loop coexist on the
-            # same tab. (See ASSUMPTIONS_PHASE2_CAPTURE.md A2.)
+            # Pre-build the LLM (validates API key, primes genai client connection)
             llm = _build_llm(args.browseruse_model, run_id=run_id)
+
+            # ── Pre-warm complete — signal readiness ──
+            _emit_stdout({
+                "type": "prewarm_ready",
+                "run_id": run_id,
+                "cdp_port": cdp_port,
+            })
+            log.info("agent.prewarm_ready_emitted",
+                     extra={"step": "agent", "run_id": run_id, "phase": "ready",
+                            "cdp_port": cdp_port})
+
+            # ── PHASE 2: wait for start command from stdin ──
+            log.info("agent.awaiting_start_command",
+                     extra={"step": "agent", "run_id": run_id, "phase": "ready"})
+
+            line = await stdin_queue.get()
+            if line is None:
+                # stdin closed without a start command — parent dropped us
+                # before the user clicked Start. Exit cleanly.
+                log.warning("agent.stdin_closed_before_start",
+                            extra={"step": "agent", "run_id": run_id, "phase": "ready"})
+                _emit_failed(run_id, "crashed",
+                             "stdin closed before start command — parent likely cancelled pre-warm")
+                return
+
+            try:
+                cmd = StartCommand.from_json_line(line)
+            except (json.JSONDecodeError, ValueError) as e:
+                _emit_failed(run_id, "setup_error",
+                             f"failed to parse start command from stdin: {e}; line={line[:200]!r}")
+                return
+            log.info("agent.start_command_received",
+                     extra={"step": "agent", "run_id": run_id, "phase": "warming",
+                            "url": cmd.url, "goal_present": cmd.goal is not None,
+                            "n_cookies": len(cmd.auth.cookies) if (cmd.auth and cmd.auth.cookies) else 0})
+
+            # Inject cookies BEFORE navigating to the real URL (D31, A12)
+            if cmd.auth and cmd.auth.cookies:
+                cookie_dicts = [
+                    {k: v for k, v in c.model_dump().items() if v is not None}
+                    for c in cmd.auth.cookies
+                ]
+                await pw_ctx.add_cookies(cookie_dicts)
+                log.info("agent.cookies_injected",
+                         extra={"step": "agent", "run_id": run_id, "phase": "warming",
+                                "n_cookies": len(cookie_dicts)})
+
+            # Real navigation
+            log.info("agent.real_nav_begin",
+                     extra={"step": "agent", "run_id": run_id, "phase": "running",
+                            "url": cmd.url})
+            await page.goto(cmd.url, wait_until="domcontentloaded", timeout=15_000)
+            log.info("agent.real_nav_done",
+                     extra={"step": "agent", "run_id": run_id, "phase": "running"})
+
+            # Build BrowserUse on top of OUR Chromium
             bu_browser = Browser(cdp_url=f"http://127.0.0.1:{cdp_port}")
-            log.info("agent.browseruse_session_built",
-                     extra={"step": "agent", "run_id": run_id, "cdp_url": f"http://127.0.0.1:{cdp_port}"})
+            log.info("agent.browseruse_browser_built",
+                     extra={"step": "agent", "run_id": run_id, "phase": "running",
+                            "cdp_url": f"http://127.0.0.1:{cdp_port}"})
 
-            task_prompt = _build_task_prompt(args.url, args.goal, args.max_recording_s)
-            log.debug("agent.task_prompt", extra={"step": "agent", "run_id": run_id, "prompt_len": len(task_prompt)})
-            # Agent accepts both `browser=` (preferred modern API) and
-            # `browser_session=` (legacy alias). Verified against
-            # browser_use/agent/service.py:138-140 in 0.12.6.
+            # D26 / Task #8 guard — defense against future browser-use default
+            # change that would auto-fire recording_watchdog and conflict with
+            # our screencast. browser-use 0.12.6 default is None; this asserts
+            # it stays None.
+            _record_video_dir = getattr(bu_browser.browser_profile, "record_video_dir", None)
+            if _record_video_dir is not None:
+                _emit_failed(run_id, "setup_error",
+                             f"browser-use's BrowserSession.browser_profile.record_video_dir "
+                             f"defaulted to {_record_video_dir!r} — that would auto-fire the "
+                             f"recording_watchdog and conflict with our CDP screencast. "
+                             f"Aesthesis owns the screencast; pin browser-use to a version "
+                             f"where this defaults to None.")
+                return
+
+            task_prompt = _build_task_prompt(cmd.url, cmd.goal, args.max_recording_s)
+            log.debug("agent.task_prompt",
+                      extra={"step": "agent", "run_id": run_id, "phase": "running",
+                             "prompt_len": len(task_prompt)})
             agent = Agent(task=task_prompt, llm=llm, browser=bu_browser)
-            log.info("agent.constructed", extra={"step": "agent", "run_id": run_id})
+            log.info("agent.constructed",
+                     extra={"step": "agent", "run_id": run_id, "phase": "running"})
 
-            # Race: agent.run() vs recording cap
+            # Race: agent.run() vs recording cap (D7 inner timeout)
             log.info("agent.run_begin",
-                     extra={"step": "agent", "run_id": run_id, "max_recording_s": args.max_recording_s})
+                     extra={"step": "agent", "run_id": run_id, "phase": "running",
+                            "max_recording_s": args.max_recording_s})
             agent_task = asyncio.create_task(agent.run(), name="browseruse_agent")
-            timer_task = asyncio.create_task(asyncio.sleep(args.max_recording_s), name="recording_cap_timer")
+            timer_task = asyncio.create_task(asyncio.sleep(args.max_recording_s),
+                                             name="recording_cap_timer")
             t_run = time.perf_counter()
 
             done, pending = await asyncio.wait(
@@ -547,7 +659,7 @@ async def _run_capture(args: argparse.Namespace) -> None:
             winner_name = next(iter(done)).get_name()
             log.info(
                 "agent.run_winner",
-                extra={"step": "agent", "run_id": run_id,
+                extra={"step": "agent", "run_id": run_id, "phase": "running",
                        "winner": winner_name, "elapsed_s": round(run_elapsed, 2)},
             )
 
@@ -559,29 +671,28 @@ async def _run_capture(args: argparse.Namespace) -> None:
             # Stop screencast — frames_for_mp4 is now final
             await streamer.stop()
 
-            # Pull action history
+            # Pull action history (D15)
             action_log = _serialise_action_history(agent, run_id=run_id)
             actions_path = run_dir / "actions.jsonl"
             actions_path.write_text(
                 "\n".join(json.dumps(a, separators=(",", ":")) for a in action_log) + "\n",
                 encoding="utf-8",
             )
-            log.info(
-                "agent.actions_written",
-                extra={"step": "agent", "run_id": run_id,
-                       "path": str(actions_path), "n_actions": len(action_log)},
-            )
+            log.info("agent.actions_written",
+                     extra={"step": "agent", "run_id": run_id, "phase": "finalizing",
+                            "path": str(actions_path), "n_actions": len(action_log)})
 
-            # Encode MP4
+            # Encode MP4 (validation.py:92 enforces H.264, see A3)
             mp4_path = run_dir / "video.mp4"
             duration_s, mp4_size = _encode_frames_to_mp4(
                 streamer.frames_for_mp4, mp4_path, run_id=run_id,
             )
 
-            # Finalize: stop CDP cleanly, close context. (Streamer already stopped.)
+            # Cleanup chromium
             await pw_ctx.close()
             await chromium.close()
-            log.info("agent.chromium_closed", extra={"step": "agent", "run_id": run_id})
+            log.info("agent.chromium_closed",
+                     extra={"step": "agent", "run_id": run_id, "phase": "finalizing"})
 
             _emit_stdout({
                 "type": "capture_complete",
@@ -590,10 +701,10 @@ async def _run_capture(args: argparse.Namespace) -> None:
                 "mp4_size_bytes": mp4_size,
                 "n_actions": len(action_log),
             })
-            log.info("agent.capture_complete_emitted", extra={"step": "agent", "run_id": run_id})
+            log.info("agent.capture_complete_emitted",
+                     extra={"step": "agent", "run_id": run_id, "phase": "completed"})
 
     except asyncio.CancelledError:
-        # Parent SIGKILL'd us mid-await — best-effort cleanup, then re-raise
         log.warning("agent.cancelled (likely parent SIGKILL grace)",
                     extra={"step": "agent", "run_id": run_id})
         raise
@@ -604,8 +715,6 @@ def _classify_exception_reason(exc: BaseException) -> str:
     msg = str(exc)
     name = type(exc).__name__
     if "Timeout" in name or "timeout" in msg.lower():
-        # Could be Playwright nav timeout — treat as navigation_error
-        # since the parent handles the WALL-clock timeout via SIGKILL.
         return "navigation_error"
     if "404" in msg or "ERR_NAME_NOT_RESOLVED" in msg or "ERR_CONNECTION_REFUSED" in msg:
         return "navigation_error"
@@ -625,7 +734,7 @@ def main() -> int:
     )
 
     try:
-        asyncio.run(_run_capture(args))
+        asyncio.run(_run_two_phase(args))
         log.info("browser_agent.main_exit_ok", extra={"run_id": args.run_id})
         return 0
     except KeyboardInterrupt:
@@ -635,7 +744,8 @@ def main() -> int:
         tb = traceback.format_exc()
         log.error(
             "browser_agent.main_exception",
-            extra={"run_id": args.run_id, "exc_type": type(e).__name__, "exc_msg": str(e), "traceback": tb},
+            extra={"run_id": args.run_id, "exc_type": type(e).__name__,
+                   "exc_msg": str(e), "traceback": tb},
         )
         _emit_failed(
             args.run_id,

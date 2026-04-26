@@ -80,6 +80,32 @@ class AnalyzeByRunRequest(BaseModel):
     goal: str | None = None
 
 
+class PrewarmRequest(BaseModel):
+    """Body of ``POST /api/prewarm`` (Phase 2 pre-warm protocol).
+
+    Empty body — pre-warming spawns a stand-by subprocess with no URL
+    or goal yet. The actual capture is triggered later via
+    ``POST /api/run/{run_id}/start`` once the user has filled the form.
+    """
+
+    # Reserved for future use (e.g. cookies for the eventual session)
+    pass
+
+
+class StartCaptureRequest(BaseModel):
+    """Body of ``POST /api/run/{run_id}/start``.
+
+    Triggers a pre-warmed subprocess to begin its actual capture.
+    ``url`` and ``goal`` are forwarded to the subprocess via stdin
+    (one JSON line). ``auth.cookies`` (if present) is also sent in
+    that same line — the subprocess sets cookies BEFORE navigating.
+    """
+
+    url: HttpUrl
+    goal: str | None = None
+    auth: AuthSpec | None = None
+
+
 # ─── HTTP response bodies ──────────────────────────────────────────────────
 
 
@@ -107,6 +133,23 @@ class CachedDemoEntry(BaseModel):
 # Binary WS frames carry raw JPEG bytes — no envelope. Anything sent as a
 # JSON message is a control message and matches one of the models below.
 # D30c.
+
+
+class WSPrewarmReady(BaseModel):
+    """Emitted by the subprocess once pre-warm is done: Chromium launched,
+    CDP screencast started, ChatGoogle LLM client constructed, page open
+    on a stand-by HTML doc. The frontend can now enable the Start button —
+    the user-perceived latency on click-to-first-frame becomes ~0ms.
+
+    Backend's ``CaptureRunner`` flips ``phase`` from ``warming`` to
+    ``ready`` when this fires. The wall-clock D1 timer is NOT yet
+    running — it starts when the user actually triggers the capture
+    via ``POST /api/run/{run_id}/start``.
+    """
+
+    type: Literal["prewarm_ready"] = "prewarm_ready"
+    run_id: str
+    cdp_port: int
 
 
 class WSStreamDegraded(BaseModel):
