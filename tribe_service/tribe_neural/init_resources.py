@@ -41,12 +41,6 @@ class Resources:
     weight_maps: Mapping[str, np.ndarray]
     vifs: np.ndarray | None = None
     pines: np.ndarray | None = None
-    #: Schaefer-400 parcel index per fsaverage5 vertex.
-    #: Shape (NUM_VERTICES,) uint16 with values in [0, 400]; 0 = unassigned.
-    #: Optional: if the bake script hasn't been run yet, the cortical brain
-    #: visualization gracefully degrades to the placeholder. The chart and
-    #: ROI pipeline don't use this. See ASSUMPTIONS_BRAIN.md §1.2.
-    parcels: np.ndarray | None = None
     data_dir: Path | None = None
     extra: dict = field(default_factory=dict)
 
@@ -118,48 +112,6 @@ def _try_load_signature(data_dir: Path, name: str) -> np.ndarray | None:
     return arr
 
 
-def _try_load_parcel_map(data_dir: Path) -> np.ndarray | None:
-    """Load the Schaefer-400 parcel-to-vertex map produced by
-    ``scripts/bake_parcel_map.py``.
-
-    Optional: if the bake hasn't been run, returns None and the cortical
-    brain visualization gracefully degrades to the placeholder geometry.
-    Loud logging in both the success and absence cases so it's obvious
-    from the boot logs whether the brain rendering will work at runtime.
-    See ASSUMPTIONS_BRAIN.md §1.2.
-    """
-    path = data_dir / "schaefer400_parcels.npy"
-    if not path.exists():
-        log.warning(
-            "parcel map not found at %s — cortical brain rendering will "
-            "fall back to the placeholder. Run "
-            "`python -m tribe_service.scripts.bake_parcel_map` to bake it.",
-            path,
-        )
-        return None
-    arr = np.load(path)
-    if arr.shape != (NUM_VERTICES,):
-        log.error(
-            "parcel map at %s has bad shape %s; expected (%d,). "
-            "Refusing to load — cortical rendering will degrade. "
-            "Re-run `python -m tribe_service.scripts.bake_parcel_map`.",
-            path, arr.shape, NUM_VERTICES,
-        )
-        return None
-    if arr.dtype != np.uint16:
-        log.warning(
-            "parcel map dtype is %s; expected uint16. Casting at load time.",
-            arr.dtype,
-        )
-        arr = arr.astype(np.uint16)
-    n_unique = int(np.unique(arr).size)
-    log.info(
-        "parcel map loaded from %s (shape=%s, unique=%d)",
-        path, arr.shape, n_unique,
-    )
-    return arr
-
-
 def load_resources() -> Resources:
     """Build the per-worker `Resources` once."""
     data_dir = _data_dir()
@@ -173,13 +125,11 @@ def load_resources() -> Resources:
     weight_maps = _load_weight_maps(data_dir)
     vifs = _try_load_signature(data_dir, "vifs")
     pines = _try_load_signature(data_dir, "pines")
-    parcels = _try_load_parcel_map(data_dir)
     runner = TribeRunner()
 
     log.info(
-        "load_resources done — %d masks, %d weight maps, vifs=%s, pines=%s, parcels=%s",
-        len(masks), len(weight_maps),
-        vifs is not None, pines is not None, parcels is not None,
+        "load_resources done — %d masks, %d weight maps, vifs=%s, pines=%s",
+        len(masks), len(weight_maps), vifs is not None, pines is not None,
     )
 
     return Resources(
@@ -188,6 +138,5 @@ def load_resources() -> Resources:
         weight_maps=weight_maps,
         vifs=vifs,
         pines=pines,
-        parcels=parcels,
         data_dir=data_dir,
     )

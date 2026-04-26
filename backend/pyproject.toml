@@ -1,6 +1,6 @@
 [project]
 name = "aesthesis-app"
-version = "0.3.0.0"
+version = "0.1.0.0"
 description = "Aesthesis backend orchestrator — /api/analyze takes two MP4s, returns the full results-page JSON."
 requires-python = ">=3.10"
 

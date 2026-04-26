@@ -35,7 +35,7 @@ log = get_logger(__name__)
 
 app = FastAPI(
     title="Aesthesis backend",
-    version="0.3.0.0",
+    version="0.2.0.0",
     description=(
         "Brain-grounded UX analysis via TRIBE v2. Step 2 (Assess) backend "
         "— accepts a single MP4 upload, returns the full results-page JSON."
@@ -168,7 +168,6 @@ async def analyze(
                 log.debug("upload cleaned up", extra=log_extra)
             except Exception:  # noqa: BLE001
                 log.warning("upload cleanup failed", exc_info=True, extra=log_extra)
-
 
 
 def make_app() -> FastAPI:

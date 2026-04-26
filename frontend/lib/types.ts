@@ -80,33 +80,6 @@ export type TimelineSummary = {
   composites_series: Record<string, number[]>
   windows: Array<Record<string, unknown>>
   processing_time_ms: number
-  // Per-parcel z-scored activations (Schaefer-400 atlas, fsaverage5).
-  // Shape (n_TRs, 400). Kept as a fallback / debugging signal; the
-  // primary brain renderer uses face_colors below. See
-  // ASSUMPTIONS_BRAIN.md §1.3.
-  parcel_series: number[][] | null
-  // Per-face uint8 RGB stream — matches Meta's TRIBE v2 demo format
-  // exactly. shape per hemi = (n_TRs, 20480, 3). data_b64 is base64 of
-  // the C-contiguous binary. When present, BrainCortical renders via
-  // the per-face shader pattern Meta uses (sharp boundaries, GPU-only
-  // sampling, zero CPU per frame).
-  face_colors: {
-    left: HemisphereFaceColors
-    right: HemisphereFaceColors
-  } | null
-}
-
-export type HemisphereFaceColors = {
-  // "uint8_rgba_bin" is the current glass-brain format (4 channels —
-  // RGB + activation-driven alpha). "uint8_rgb_bin" is the legacy
-  // 3-channel format from earlier deploys; the frontend
-  // (buildAtlasTexture in BrainCortical.tsx) auto-detects from the
-  // byte count and treats legacy streams as fully opaque.
-  format: "uint8_rgba_bin" | "uint8_rgb_bin"
-  shape: [number, number, number] // [n_frames, n_faces, 3 | 4]
-  n_frames: number
-  n_faces: number
-  data_b64: string
 }
 
 export type AnalyzeRequestMeta = {

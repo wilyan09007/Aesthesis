@@ -25,14 +25,6 @@ nibabel>=5.1
 nimare>=0.3
 nltools>=0.5
 
-# Mesh bake (one-time cortical GLB generation; NOT on the request path).
-# Used by tribe_service/scripts/bake_brain_glbs.py to write fsaverage5
-# cortical meshes with custom _PARCELID / _SULC vertex attributes that
-# the frontend (BrainCortical.tsx) consumes via drei's useGLTF.
-# See ASSUMPTIONS_BRAIN.md §2.
-pygltflib>=1.16
-trimesh>=4.0
-
 # Audio (used by TRIBE's get_events_dataframe pipeline)
 whisperx==3.1.1
 edge-tts>=6.1

@@ -51,27 +51,6 @@ def _summarize_timeline(timeline: dict) -> TimelineSummary:
         for k in composites_keys:
             composites_series[k].append(float(c.get(k, 0.0)))
 
-    # parcel_series is optional. Only the TRIBE worker that has
-    # data/schaefer400_parcels.npy on disk attaches it. Old workers don't
-    # send the field; new workers send (n_TRs, 400) of float z-scores.
-    # ASSUMPTIONS_BRAIN.md §1.3 + §4.1.
-    parcel_series = timeline.get("parcel_series")
-    if parcel_series is not None:
-        log.debug(
-            "timeline carries parcel_series",
-            extra={"step": "output", "n_trs": len(parcel_series),
-                   "n_parcels": len(parcel_series[0]) if parcel_series else 0},
-        )
-
-    face_colors = timeline.get("face_colors")
-    if face_colors is not None:
-        log.debug(
-            "timeline carries face_colors",
-            extra={"step": "output",
-                   "lh_kb": round(len(face_colors["left"]["data_b64"]) / 1024, 1),
-                   "rh_kb": round(len(face_colors["right"]["data_b64"]) / 1024, 1)},
-        )
-
     return TimelineSummary(
         n_trs=int(timeline.get("n_trs", 0)),
         tr_duration_s=float(timeline.get("tr_duration_s", 1.5)),
@@ -79,8 +58,6 @@ def _summarize_timeline(timeline: dict) -> TimelineSummary:
         composites_series=composites_series,
         windows=timeline.get("windows", []),
         processing_time_ms=float(timeline.get("processing_time_ms", 0.0)),
-        parcel_series=parcel_series,
-        face_colors=face_colors,
     )
 
 

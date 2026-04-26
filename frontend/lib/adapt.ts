@@ -52,47 +52,15 @@ export type ResultsViewData = {
   insights: Insight[]
   duration_s: number
   assessment: OverallAssessment
-  // (n_TRs, 400) per-parcel z-scored activations. Fallback/debug-only;
-  // the primary cortical renderer reads face_colors below.
-  parcel_series: number[][] | null
-  // Per-face uint8 RGB color stream (Meta TRIBE v2 demo format).
-  // Drives the BrainCortical shader. Null when the worker hasn't been
-  // updated to emit it.
-  face_colors: AnalyzeResponse["timeline"]["face_colors"]
-  // Lifted from raw.timeline so BrainCortical doesn't need to dig.
-  tr_duration_s: number
   raw: AnalyzeResponse
 }
 
 export function adaptForResultsView(resp: AnalyzeResponse): ResultsViewData {
-  // Verbose dev console — ASSUMPTIONS_BRAIN.md §5.3. Lets you tell at a
-  // glance whether the cortical brain will render or fall back. Console
-  // log lines are cheap; stripped by Next.js minifier in prod builds.
-  const parcelSeries = resp.timeline.parcel_series ?? null
-  // eslint-disable-next-line no-console
-  console.info("[adapt] parcel_series",
-    parcelSeries
-      ? { n_trs: parcelSeries.length, n_parcels: parcelSeries[0]?.length ?? 0 }
-      : "null (cortical brain will fall back to placeholder)",
-  )
-  const faceColors = resp.timeline.face_colors ?? null
-  // eslint-disable-next-line no-console
-  console.info("[adapt] face_colors",
-    faceColors
-      ? {
-          lh: { ...faceColors.left, data_b64: `<${faceColors.left.data_b64.length} chars>` },
-          rh: { ...faceColors.right, data_b64: `<${faceColors.right.data_b64.length} chars>` },
-        }
-      : "null (cortical brain will use parcel_series fallback)",
-  )
   return {
     frames: framesFromTimeline(resp.timeline),
     insights: resp.insights,
     duration_s: resp.duration_s,
     assessment: resp.overall_assessment,
-    parcel_series: parcelSeries,
-    face_colors: faceColors,
-    tr_duration_s: resp.timeline.tr_duration_s,
     raw: resp,
   }
 }
