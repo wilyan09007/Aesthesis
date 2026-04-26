@@ -53,3 +53,6 @@ backend/uploads/
 # Test videos (too large for git; commit-ignored even if present in worktree)
 *.mp4
 .env.example
+
+# Local bake artifacts (parcel map, face indices); deployed to Modal volume
+data/
