@@ -72,7 +72,11 @@ class TribeClient:
         self.timeout_s = timeout_s
 
     async def health(self) -> dict:
-        async with httpx.AsyncClient(base_url=self.base_url, timeout=10) as client:
+        # Honors self.timeout_s — the warmup endpoint passes a long value
+        # (~120s) so we actually wait through Tribe's cold start instead
+        # of returning a fast unreachable.
+        timeout = httpx.Timeout(self.timeout_s, connect=10.0)
+        async with httpx.AsyncClient(base_url=self.base_url, timeout=timeout) as client:
             r = await client.get("/health")
             r.raise_for_status()
             return r.json()

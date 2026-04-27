@@ -1,8 +1,9 @@
 "use client"
 
-import { lazy, Suspense } from "react"
+import { lazy, Suspense, useEffect } from "react"
 import { motion } from "framer-motion"
 import AuthButton from "./AuthButton"
+import { prewarmTribe } from "@/lib/api"
 
 // Hero brain — same cortical visualization the results page uses, driven
 // by a client-side synthetic activation sequence. Lazy so the heavy three.js
@@ -54,6 +55,11 @@ const STEPS = [
 ]
 
 export default function Landing({ onSkipToAssess }: LandingProps) {
+  // Wake the Tribe GPU container while the user is reading the hero — the
+  // cold start (~30-60s) finishes before they click through to upload, so
+  // /api/analyze hits a warm Tribe and stays under the 150s proxy ceiling.
+  useEffect(() => { prewarmTribe() }, [])
+
   return (
     <div className="relative min-h-screen overflow-x-hidden" style={{
       backgroundImage: "radial-gradient(rgba(255,255,255,0.028) 1px, transparent 1px)",

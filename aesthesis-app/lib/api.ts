@@ -181,3 +181,13 @@ export async function pingHealth(signal?: AbortSignal): Promise<{
     }
   }
 }
+
+// Fire-and-forget Tribe GPU prewarm. Hits the orchestrator's /api/warmup,
+// which waits up to 120s for Tribe to come up — long enough to absorb a
+// cold start (~30-60s of V-JEPA + mask load) before the user clicks Analyze.
+// Without this, a cold first request blows past Modal's 150s proxy timeout.
+export function prewarmTribe(): void {
+  fetch(`${API_BASE_URL}/api/warmup`, { cache: "no-store" }).catch(() => {
+    /* fire-and-forget — failure here just means the analyze call eats the cold start */
+  })
+}

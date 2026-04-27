@@ -54,10 +54,14 @@ export async function getRunForUser(runId: string, userId: string) {
 }
 
 function computeAvgRoi(values: ROIValues[]): ROIValues {
+  // Tribe emits z-scored ROI signals (mean≈0 over time), so a plain
+  // time-average collapses to floating-point noise and breaks the
+  // Backboard compare_runs / get_run_trends tools. Mean absolute value
+  // captures activation strength and produces meaningful deltas.
   if (!values.length) return Object.fromEntries(ROI_KEYS.map((k) => [k, 0])) as ROIValues
   const sums = Object.fromEntries(ROI_KEYS.map((k) => [k, 0])) as Record<keyof ROIValues, number>
   for (const v of values) {
-    for (const key of ROI_KEYS) sums[key] += v[key]
+    for (const key of ROI_KEYS) sums[key] += Math.abs(v[key])
   }
   return Object.fromEntries(ROI_KEYS.map((k) => [k, sums[k] / values.length])) as ROIValues
 }

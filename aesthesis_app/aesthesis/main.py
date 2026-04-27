@@ -108,6 +108,29 @@ async def health() -> dict[str, Any]:
     return out
 
 
+@app.get("/api/warmup")
+async def warmup() -> dict[str, Any]:
+    """Wake the Tribe GPU container ahead of an /api/analyze call.
+
+    The frontend fires this on landing-page mount so the user's actual
+    upload doesn't pay the cold-start tax. Tribe cold start is ~30-60s
+    (V-JEPA-2 weights + masks + neuro signatures); the proxy on Modal
+    has a 150s sync timeout, so a cold first analyze can fail. This
+    endpoint waits long enough to actually prime the container, then
+    returns. Fire-and-forget from the client.
+    """
+    t0 = time.perf_counter()
+    try:
+        await TribeClient(get_config().tribe_service_url, timeout_s=120).health()
+        elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 1)
+        log.info("warmup ok", extra={"step": "warmup", "elapsed_ms": elapsed_ms})
+        return {"ok": True, "elapsed_ms": elapsed_ms}
+    except Exception as e:  # noqa: BLE001
+        elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 1)
+        log.warning("warmup failed: %s", e, extra={"step": "warmup", "elapsed_ms": elapsed_ms})
+        return {"ok": False, "error": str(e), "elapsed_ms": elapsed_ms}
+
+
 @app.post("/api/analyze")
 async def analyze(
     video: UploadFile = File(..., description="MP4 of the demo to analyze"),
