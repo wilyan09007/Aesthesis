@@ -46,17 +46,24 @@ app = FastAPI(
 # /api/analyze from a different origin (e.g. localhost:3000 → localhost:8000)
 # so without this the preflight + actual request both fail before they ever
 # reach the orchestrator. Origins come from config — never hardcoded here.
-_cors_origins = get_config().cors_allow_origins
+# The regex covers Vercel preview deploys (aesthesis-frontend-<hash>-<team>
+# .vercel.app), which an exact-match list would miss and the browser would
+# surface as TypeError: Failed to fetch.
+_cfg = get_config()
+_cors_origins = _cfg.cors_allow_origins
+_cors_regex = _cfg.cors_allow_origin_regex
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
+    allow_origin_regex=_cors_regex,
     allow_credentials=False,  # we don't use cookies; keeps wildcard combos legal
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
     expose_headers=["X-Aesthesis-Run-Id", "X-Aesthesis-Elapsed-Ms"],
 )
 log.info("CORS configured", extra={"step": "startup",
-                                    "cors_allow_origins": _cors_origins})
+                                    "cors_allow_origins": _cors_origins,
+                                    "cors_allow_origin_regex": _cors_regex})
 
 
 @app.middleware("http")

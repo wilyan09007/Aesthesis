@@ -70,6 +70,17 @@ class AppConfig(BaseModel):
             "Defaults cover the Next.js dev server."
         ),
     )
+    cors_allow_origin_regex: str | None = Field(
+        default_factory=lambda: os.getenv("CORS_ALLOW_ORIGIN_REGEX") or None,
+        description=(
+            "Regex of additional origins to allow alongside cors_allow_origins. "
+            "Vercel mints a fresh URL per preview/branch deploy "
+            "(e.g. aesthesis-frontend-<hash>-<team>.vercel.app), so an exact-match "
+            "list misses them and the browser sees TypeError: Failed to fetch. "
+            "A pattern like ^https://aesthesis-frontend(-[a-z0-9-]+)?\\.vercel\\.app$ "
+            "covers canonical + every preview URL for the project."
+        ),
+    )
 
     def model_post_init(self, _ctx) -> None:  # noqa: D401
         self.upload_dir.mkdir(parents=True, exist_ok=True)

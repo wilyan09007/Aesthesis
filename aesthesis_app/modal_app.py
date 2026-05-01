@@ -45,7 +45,20 @@ image = (
         "ffmpeg-python>=0.2",
         "google-generativeai>=0.7",
     )
-    .env({"UPLOAD_DIR": "/tmp/uploads"})
+    .env({
+        "UPLOAD_DIR": "/tmp/uploads",
+        # Vercel mints a fresh URL per preview/branch deploy
+        # (aesthesis-frontend-<hash>-<team>.vercel.app); an exact-match CORS
+        # allowlist would reject those and the browser would surface the
+        # rejection as TypeError: Failed to fetch — looking to the user
+        # like the backend went away. Regex covers canonical + every
+        # preview URL for the project. CORS_ALLOW_ORIGINS in the named
+        # secret stays authoritative for explicit prod hosts.
+        # Note: ``[.]`` instead of ``\.`` because Modal's image-env serialises
+        # the value through a layer that rejects unrecognised backslash escapes.
+        # Same regex semantics, no escape headaches.
+        "CORS_ALLOW_ORIGIN_REGEX": "^https://aesthesis-frontend(-[a-z0-9-]+)?[.]vercel[.]app$",
+    })
     .add_local_python_source("aesthesis")
 )
 

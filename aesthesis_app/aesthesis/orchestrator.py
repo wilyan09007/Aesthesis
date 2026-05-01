@@ -45,12 +45,29 @@ async def _attach_screenshots(
     run_id: str,
 ) -> None:
     """Mutates ``events`` in place — attaches ``.screenshot_path`` for every
-    event whose timestamp we can extract a frame for."""
+    event whose timestamp we can extract a frame for.
+
+    Each event spawns its own ffmpeg invocation; on Modal's 2-CPU container
+    that's still cheap enough to fan out across the 15-event cap because
+    ffmpeg with ``-ss`` before ``-i`` is keyframe-seek (sub-second). Running
+    sequentially used to add ~30s on bad runs (failures stacking the 2s
+    subprocess timeout). Fanning out drops it to roughly the worst single
+    extraction.
+
+    Emits a summary log line at the end so the per-run success rate is
+    visible at INFO without grepping the noisy per-event traces. Gemini
+    grounding quality drops sharply when many events lose their image
+    so this is a load-bearing observability hook, not just nice-to-have.
+    """
+    if not events:
+        return
     work_dir.mkdir(parents=True, exist_ok=True)
     log.debug(
         "extracting screenshots",
         extra={"step": "screenshots", "run_id": run_id, "n_events": len(events)},
     )
+
+    t0 = time.perf_counter()
 
     def _extract(e: Event) -> None:
         out = work_dir / f"t{e.timestamp_s:.2f}.jpg"
@@ -58,12 +75,28 @@ async def _attach_screenshots(
         if path is not None:
             e.screenshot_path = str(path)
 
-    # ffmpeg work is CPU-bound and short; run sequentially in this thread.
-    for e in events:
+    async def _extract_one(e: Event) -> None:
         try:
-            _extract(e)
+            await asyncio.to_thread(_extract, e)
         except Exception as ex:  # noqa: BLE001
             log.debug("screenshot failed at t=%.2f: %s", e.timestamp_s, ex)
+
+    await asyncio.gather(*(_extract_one(e) for e in events))
+
+    n_ok = sum(1 for e in events if e.screenshot_path)
+    total_bytes = sum(
+        Path(e.screenshot_path).stat().st_size
+        for e in events
+        if e.screenshot_path and Path(e.screenshot_path).exists()
+    )
+    elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 1)
+    log.info(
+        "screenshots: %d/%d events grounded (%d bytes total, %.1fms)",
+        n_ok, len(events), total_bytes, elapsed_ms,
+        extra={"step": "screenshots", "run_id": run_id,
+               "n_ok": n_ok, "n_events": len(events),
+               "bytes": total_bytes, "elapsed_ms": elapsed_ms},
+    )
 
 
 async def run_analysis(
