@@ -82,7 +82,7 @@ def _strip_code_fence(text: str) -> str:
 
 async def _call_gemini(prompt: str, *, cfg: AppConfig, model_name: str,
                        run_id: str, step: str,
-                       images: list[bytes] | None = None) -> dict:
+                       images: list[bytes] | None = None) -> Any:
     """Invoke Gemini and return the parsed JSON response.
 
     ``images`` is a list of raw JPEG bytes. We pass them as inline image
@@ -127,16 +127,51 @@ async def _call_gemini(prompt: str, *, cfg: AppConfig, model_name: str,
         request_options={"retry": no_retry},
     )
     elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 1)
-    text = _strip_code_fence(resp.text)
-    log.debug(
+    # Defensive: resp.text can raise if the response was safety-blocked
+    # (no Parts on the candidate). Surface that explicitly with the
+    # finish_reason so we don't print a confusing JSONDecodeError.
+    try:
+        raw_text = resp.text
+    except Exception as e:  # noqa: BLE001
+        finish_reasons = []
+        try:
+            for cand in (resp.candidates or []):
+                fr = getattr(cand, "finish_reason", None)
+                if fr is not None:
+                    finish_reasons.append(str(fr))
+        except Exception:  # noqa: BLE001
+            pass
+        log.error(
+            "Gemini response had no text — likely safety-blocked. finish_reasons=%s",
+            finish_reasons,
+            extra={"step": step, "run_id": run_id,
+                   "elapsed_ms": elapsed_ms,
+                   "finish_reasons": finish_reasons},
+        )
+        raise SynthesizerError(
+            f"Gemini returned no text (finish_reasons={finish_reasons}): {e}"
+        ) from e
+
+    text = _strip_code_fence(raw_text)
+    log.info(
         "Gemini response received",
         extra={"step": step, "run_id": run_id,
                "elapsed_ms": elapsed_ms,
-               "response_chars": len(text)},
+               "response_chars": len(text),
+               # Excerpt the head + tail so we can diagnose empty-response
+               # / wrong-shape failures from production logs without
+               # capturing the full body (which can include user copy).
+               "response_head": text[:200],
+               "response_tail": text[-200:] if len(text) > 200 else ""},
     )
     try:
         return json.loads(text)
     except json.JSONDecodeError as e:
+        log.error(
+            "Gemini JSON decode failed — body excerpt: %s",
+            text[:600],
+            extra={"step": step, "run_id": run_id},
+        )
         raise SynthesizerError(
             f"Gemini returned malformed JSON (step={step}): {e}"
         ) from e
@@ -297,6 +332,47 @@ def _build_insight_from_raw(entry: dict, idx: int, run_id: str) -> Insight | Non
     )
 
 
+def _degraded_insight_from_event(event: Event) -> Insight:
+    """Last-resort fallback when Gemini returns nothing usable.
+
+    Builds a minimal Insight from the event's raw fields. The renderer
+    routes this through the unclear branch (confidence=0, no target),
+    so the user gets a "investigate this moment" prompt rather than a
+    fix instruction. This is strictly better than a 500 — the brain
+    timeline + assessment + per-event timestamps + cited features are
+    still real signal; only the agent-paste prompt degrades.
+
+    Reason for the fallback path: Gemini in JSON mode occasionally
+    returns an empty response or a wrong-shape body when the prompt
+    is unusually strict. We log + recover instead of crashing.
+    """
+    roi = event.primary_roi or "an unspecified region"
+    cited = [event.primary_roi] if event.primary_roi else []
+    if event.type:
+        # Carry the deterministic event type into cited features so the
+        # unclear-branch prompt has at least one thing to anchor on.
+        cited = list(dict.fromkeys([*cited, f"event_type:{event.type}"]))
+
+    return Insight(
+        timestamp_range_s=(event.timestamp_s, event.timestamp_s + 1.5),
+        ux_observation=(
+            f"At t={event.timestamp_s:.1f}s, a {event.type} event fired in "
+            f"{roi}. The screenshot at this timestamp was not enough for "
+            "the analysis pass to commit to a specific element — investigate "
+            "the frame manually before applying any change."
+        ),
+        recommendation="Investigate this moment in the screen recording.",
+        cited_brain_features=cited,
+        cited_screen_moment=f"frame at t={event.timestamp_s:.1f}s",
+        target_element=None,
+        proposed_change=None,
+        acceptance_criteria=[],
+        confidence=0.0,
+        agent_prompt="",  # filled by enrichment step (unclear-branch render)
+        annotated_screenshot_b64=None,
+    )
+
+
 async def _generate_structured_insights(
     events: list[Event],
     *,
@@ -348,11 +424,42 @@ async def _generate_structured_insights(
         images=images or None,
     )
 
-    raw_insights = raw.get("insights", []) if isinstance(raw, dict) else []
-    log.debug(
-        "Gemini returned %d raw insight entries",
-        len(raw_insights),
-        extra={"step": "synth.insights", "run_id": run_id},
+    # Permissive parsing: Gemini in JSON mode is supposed to return our
+    # exact `{"insights": [...]}` shape, but a long restrictive prompt
+    # sometimes makes it return a top-level array, an alternate key,
+    # or just `{}`. Try every reasonable shape before giving up.
+    raw_insights: list = []
+    raw_shape: str = "unknown"
+    if isinstance(raw, list):
+        raw_insights = raw
+        raw_shape = "top_level_array"
+    elif isinstance(raw, dict):
+        # Canonical key first, then a handful of plausible alternates.
+        for key in ("insights", "events", "results", "items", "data"):
+            v = raw.get(key)
+            if isinstance(v, list) and v:
+                raw_insights = v
+                raw_shape = f"dict[{key}]"
+                break
+        if not raw_insights:
+            # Last-ditch: any list-valued field with object entries.
+            for key, value in raw.items():
+                if (isinstance(value, list) and value
+                        and isinstance(value[0], dict)):
+                    raw_insights = value
+                    raw_shape = f"dict[{key}]_inferred"
+                    log.info(
+                        "synth: Gemini used unexpected key %r — accepting it",
+                        key,
+                        extra={"step": "synth.parse", "run_id": run_id},
+                    )
+                    break
+
+    log.info(
+        "Gemini returned %d raw insight entries (shape=%s)",
+        len(raw_insights), raw_shape,
+        extra={"step": "synth.insights", "run_id": run_id,
+               "n_raw": len(raw_insights), "shape": raw_shape},
     )
 
     out: list[Insight] = []
@@ -370,10 +477,20 @@ async def _generate_structured_insights(
             out.append(ins)
 
     if not out:
-        raise SynthesizerError(
-            f"Gemini insight call returned 0 valid insights from "
-            f"{len(raw_insights)} entries"
+        # Degraded-mode fallback: Gemini either returned nothing usable or
+        # the schema couldn't be parsed. Rather than 500, build a minimal
+        # "unclear-branch" Insight per event — the user gets a results page
+        # with timeline + assessment + per-event "investigate this moment"
+        # prompts instead of a hard failure. The event payload alone is
+        # enough to drive the unclear-branch renderer.
+        log.warning(
+            "synth: Gemini returned 0 usable insights for %d events "
+            "(shape=%s) — falling back to degraded per-event placeholders",
+            len(events), raw_shape,
+            extra={"step": "synth.degraded", "run_id": run_id,
+                   "n_events": len(events), "shape": raw_shape},
         )
+        out = [_degraded_insight_from_event(e) for e in events]
 
     log.info(
         "synth: %d insights parsed (target_elements=%d, proposed_changes=%d, "
