@@ -30,6 +30,7 @@ from .config import AppConfig, get_config
 from .logging_config import configure_logging, get_logger
 from .orchestrator import OrchestratorError, run_analysis
 from .schemas import ValidationFailure
+from .synthesizer import GeminiQuotaExceededError
 from .tribe_client import TribeClient, TribeServiceError
 
 configure_logging()
@@ -289,6 +290,28 @@ async def analyze(
     except TribeServiceError as e:
         log.error("TRIBE service error: %s", e, extra=log_extra)
         raise HTTPException(status_code=502, detail=str(e)) from e
+    except GeminiQuotaExceededError as e:
+        # Daily/per-minute Gemini quota exceeded. Map to 503 with the
+        # suggested retry delay so the frontend can show a real error
+        # message ("Gemini quota exhausted, try again in N seconds")
+        # instead of letting it bubble as a generic 500 / connection
+        # drop. Daily exhaustion needs a model swap or billing upgrade
+        # — short retry_delay isn't enough.
+        log.error("Gemini quota exceeded: %s", e, extra=log_extra)
+        retry_after = (
+            f"{int(e.retry_delay_s) + 1}" if e.retry_delay_s else "60"
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Gemini API quota exhausted. Either wait for the quota to "
+                "reset or switch GEMINI_MODEL_INSIGHTS / "
+                "GEMINI_MODEL_VERDICT to a higher-quota model "
+                "(e.g. gemini-2.5-flash). "
+                f"Suggested retry: {retry_after}s."
+            ),
+            headers={"Retry-After": retry_after},
+        ) from e
     except Exception as e:  # noqa: BLE001
         log.exception("unexpected error in /api/analyze", extra=log_extra)
         raise HTTPException(status_code=500, detail=f"internal error: {e}") from e

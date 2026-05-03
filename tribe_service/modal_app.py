@@ -132,6 +132,17 @@ volume = modal.Volume.from_name(
 @app.function(
     gpu="A100-40GB",
     min_containers=0,
+    # Keep the GPU container alive for 30 minutes after the last
+    # request before scaling to zero. Modal's default is 60 seconds,
+    # which is shorter than typical user think-time between landing
+    # and clicking analyze. Without this bump, the orchestrator's
+    # warmup loaded V-JEPA weights, the user paused to read the page
+    # for ~90s, and Tribe scaled back to zero — the first analyze
+    # then re-paid the full ~28s model-load cost in-band, and on
+    # videos > ~30s the combined wall time tripped Modal's web
+    # proxy timeout. 30 min is enough headroom for a normal session
+    # while still scaling to zero overnight.
+    scaledown_window=30 * 60,
     timeout=600,
     cpu=4,
     memory=32 * 1024,

@@ -31,6 +31,7 @@ collapsed that to two single-subject calls — DESIGN.md §17.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -57,6 +58,81 @@ log = logging.getLogger(__name__)
 
 class SynthesizerError(RuntimeError):
     """Raised when a Gemini call cannot be completed or its output is unusable."""
+
+
+class GeminiQuotaExceededError(SynthesizerError):
+    """Gemini returned 429 ResourceExhausted — daily or per-minute quota.
+
+    Carries the suggested retry_delay so the API layer can map this to a
+    user-actionable 503 response instead of a generic 500. Daily-quota
+    exhaustion needs a model swap or billing upgrade; per-minute can
+    self-heal with a short wait.
+    """
+
+    def __init__(self, message: str, *, retry_delay_s: float | None = None):
+        super().__init__(message)
+        self.retry_delay_s = retry_delay_s
+
+
+def _retry_delay_from_exception(e: BaseException) -> float | None:
+    """Pull the suggested retry_delay (in seconds) out of a Gemini 429.
+
+    google.api_core.exceptions.ResourceExhausted carries a
+    ``retry_delay`` proto on the error details. We extract it
+    defensively — schemas drift across SDK versions.
+    """
+    try:
+        from google.api_core.exceptions import ResourceExhausted  # type: ignore
+    except ImportError:
+        return None
+    if not isinstance(e, ResourceExhausted):
+        return None
+
+    # Look at the structured details for a retry_delay proto.
+    for detail in getattr(e, "details", []) or []:
+        delay = getattr(detail, "retry_delay", None)
+        if delay is not None:
+            seconds = getattr(delay, "seconds", 0) or 0
+            nanos = getattr(delay, "nanos", 0) or 0
+            return float(seconds) + float(nanos) / 1e9
+
+    # Fallback: parse from the string representation. Gemini's 429
+    # message embeds "Please retry in 17.915s." somewhere.
+    msg = str(e)
+    m = re.search(r"retry[_ ]delay[: ]*\{?\s*seconds:\s*(\d+)", msg)
+    if m:
+        return float(m.group(1))
+    m = re.search(r"retry in (\d+(?:\.\d+)?)s", msg, re.IGNORECASE)
+    if m:
+        return float(m.group(1))
+    return None
+
+
+def _raise_for_quota(e: BaseException, *, step: str, run_id: str) -> None:
+    """If the exception is a Gemini quota error, log + re-raise as
+    ``GeminiQuotaExceededError``. Otherwise return without raising —
+    caller is expected to ``raise`` the original exception themselves.
+    """
+    try:
+        from google.api_core.exceptions import ResourceExhausted  # type: ignore
+    except ImportError:
+        return
+    if not isinstance(e, ResourceExhausted):
+        return
+
+    delay = _retry_delay_from_exception(e)
+    msg_excerpt = str(e)[:400]
+    log.error(
+        "Gemini quota exceeded (429). step=%s run_id=%s retry_delay=%s",
+        step, run_id, delay,
+        extra={"step": step, "run_id": run_id,
+               "retry_delay_s": delay,
+               "error_excerpt": msg_excerpt},
+    )
+    raise GeminiQuotaExceededError(
+        f"Gemini API quota exceeded. step={step}. {msg_excerpt}",
+        retry_delay_s=delay,
+    ) from e
 
 
 @dataclass
@@ -120,12 +196,42 @@ async def _call_gemini(prompt: str, *, cfg: AppConfig, model_name: str,
     # surfaces immediately instead of stalling the request for ~70s while
     # the api_core layer retries against the same failure mode.
     no_retry = _retries.AsyncRetry(predicate=lambda _exc: False)
-    resp = await model.generate_content_async(
-        parts,
-        generation_config={"response_mime_type": "application/json",
-                           "temperature": 0.2},
-        request_options={"retry": no_retry},
-    )
+
+    async def _do_call():
+        return await model.generate_content_async(
+            parts,
+            generation_config={"response_mime_type": "application/json",
+                               "temperature": 0.2},
+            request_options={"retry": no_retry},
+        )
+
+    # Single in-band retry on 429: if Gemini returns a per-minute rate
+    # limit with a short retry_delay, sleep + retry once. Daily-quota
+    # exhaustion has a much longer retry_delay (hours/days) — those we
+    # surface immediately as GeminiQuotaExceededError so the API layer
+    # can return a clean 503 rather than holding the connection open.
+    try:
+        resp = await _do_call()
+    except Exception as e:  # noqa: BLE001
+        delay = _retry_delay_from_exception(e)
+        if delay is not None and delay <= 30.0:
+            log.warning(
+                "Gemini 429 (transient, retry_delay=%.1fs) — sleeping then "
+                "retrying once. step=%s run_id=%s",
+                delay, step, run_id,
+                extra={"step": step, "run_id": run_id,
+                       "retry_delay_s": delay},
+            )
+            await asyncio.sleep(delay + 0.5)
+            try:
+                resp = await _do_call()
+            except Exception as e2:  # noqa: BLE001
+                _raise_for_quota(e2, step=step, run_id=run_id)
+                raise
+        else:
+            _raise_for_quota(e, step=step, run_id=run_id)
+            raise
+
     elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 1)
     # Defensive: resp.text can raise if the response was safety-blocked
     # (no Parts on the candidate). Surface that explicitly with the
