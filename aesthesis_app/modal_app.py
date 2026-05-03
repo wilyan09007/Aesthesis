@@ -84,6 +84,87 @@ def fastapi_app():
     return app
 
 
+@app.function(
+    cpu=2,
+    memory=4 * 1024,
+    timeout=600,
+    min_containers=0,
+    secrets=[modal.Secret.from_name("aesthesis-orchestrator")],
+)
+def analyze_blocking(video_bytes: bytes, goal: str | None, run_id: str) -> dict:
+    """Background analyze job spawned via ``Function.spawn`` from the
+    FastAPI ``/api/analyze`` handler.
+
+    Why this function exists: Modal's web proxy enforces a ~150s sync
+    timeout on web endpoints (``@modal.asgi_app``), regardless of the
+    function's ``timeout=`` parameter. On real videos, V-JEPA encoding
+    alone takes 80–130s, plus the orchestrator's screenshot fan-out
+    plus two Gemini calls plus the upstream Tribe HTTP — total wall
+    time routinely exceeds 150s. Modal's proxy then drops the
+    browser → orchestrator connection mid-pipeline and the browser
+    sees ``TypeError: Failed to fetch`` even though Tribe is still
+    happily processing on the other side.
+
+    This function is NOT exposed as a web endpoint. It's a regular
+    Modal function invoked via internal RPC (``Function.spawn``), and
+    the only timeout that applies is the function's own ``timeout=600s``
+    ceiling. The browser hits the FastAPI handler (which returns a
+    job_id in <1s), then polls a separate status endpoint that does a
+    non-blocking ``FunctionCall.get(timeout=0)`` against this job. No
+    long-held HTTP connection, no proxy ceiling.
+
+    Returns the AnalyzeResponse as a plain dict (Pydantic ``model_dump``).
+    Exceptions propagate to the caller via ``FunctionCall.get()`` — the
+    /api/analyze/status endpoint catches and serializes them as
+    ``{"status": "failed", "error": ...}``.
+    """
+    import asyncio  # noqa: WPS433
+    import logging  # noqa: WPS433
+    import shutil  # noqa: WPS433
+    from pathlib import Path  # noqa: WPS433
+
+    from aesthesis.config import get_config  # noqa: WPS433
+    from aesthesis.logging_config import configure_logging  # noqa: WPS433
+    from aesthesis.orchestrator import run_analysis  # noqa: WPS433
+
+    configure_logging()
+    log = logging.getLogger("aesthesis.modal.analyze_blocking")
+
+    cfg = get_config()
+    work_dir = cfg.upload_dir / run_id
+    work_dir.mkdir(parents=True, exist_ok=True)
+    video_path = work_dir / "video.mp4"
+    video_path.write_bytes(video_bytes)
+    log.info(
+        "analyze_blocking begin run_id=%s size=%d",
+        run_id, len(video_bytes),
+        extra={"step": "modal.analyze_blocking", "run_id": run_id,
+               "size_bytes": len(video_bytes)},
+    )
+
+    try:
+        # run_analysis is async; we're in a sync Modal function context,
+        # so spin up a fresh event loop. asyncio.run is fine here because
+        # this function gets its own container per call.
+        response = asyncio.run(
+            run_analysis(cfg=cfg, video=video_path, goal=goal, run_id=run_id),
+        )
+        log.info(
+            "analyze_blocking done run_id=%s elapsed_ms=%.1f n_insights=%d",
+            run_id, response.elapsed_ms, len(response.insights),
+            extra={"step": "modal.analyze_blocking", "run_id": run_id,
+                   "elapsed_ms": response.elapsed_ms,
+                   "n_insights": len(response.insights)},
+        )
+        return response.model_dump(mode="json")
+    finally:
+        # Clean up the upload regardless of success/failure. The
+        # ephemeral filesystem will go away when the container exits
+        # anyway, but explicit cleanup keeps long-warm containers tidy.
+        if cfg.cleanup_uploads:
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     print("deploy: modal deploy modal_app.py")
     print("logs:   modal app logs aesthesis-orchestrator --tail")

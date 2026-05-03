@@ -33,6 +33,16 @@ from .schemas import ValidationFailure
 from .synthesizer import GeminiQuotaExceededError
 from .tribe_client import TribeClient, TribeServiceError
 
+# Modal SDK is only available inside the Modal container. Keep the
+# import lazy so local pytest runs (which don't have the modal package
+# installed at test time) don't crash on module load.
+try:
+    import modal as _modal  # type: ignore
+    _MODAL_AVAILABLE = True
+except ImportError:
+    _modal = None  # type: ignore
+    _MODAL_AVAILABLE = False
+
 configure_logging()
 log = get_logger(__name__)
 
@@ -245,6 +255,22 @@ async def analyze(
     video: UploadFile = File(..., description="MP4 of the demo to analyze"),
     goal: str | None = Form(default=None),
 ) -> JSONResponse:
+    """Spawn a background analyze job and return a job_id immediately.
+
+    The actual ~6-13s warm / 80-300s real-video analyze work runs inside
+    the ``analyze_blocking`` Modal function (see modal_app.py), invoked
+    via ``Function.spawn`` so it doesn't go through Modal's web proxy.
+    Modal's web proxy has a hard ~150s sync timeout on web endpoints —
+    that's what was killing real-video analyzes mid-pipeline. Spawn'd
+    functions only obey the function's own timeout=600s, so we have
+    full headroom for cold Tribe + V-JEPA + 2 Gemini calls.
+
+    The browser polls ``/api/analyze/status/{job_id}`` every ~3s until
+    status flips to ``done`` or ``failed``. Each individual poll is a
+    50–200ms request, well under the proxy ceiling.
+
+    Returns ``{"job_id": "fc-...", "run_id": "...", "status": "queued"}``.
+    """
     cfg = get_config()
     rid = str(uuid.uuid4())
     log_extra = {"run_id": rid, "step": "endpoint",
@@ -254,23 +280,88 @@ async def analyze(
                  "video_filename": video.filename,
                  "content_type": video.content_type,
                  "goal_present": goal is not None}
-    log.info("/api/analyze received", extra=log_extra)
+    log.info("/api/analyze received (async spawn)", extra=log_extra)
 
-    # Persist the upload under cfg.upload_dir / run_id / .
+    if not _MODAL_AVAILABLE:
+        # Local dev fallback: the Modal SDK isn't installed (or this is
+        # a non-Modal run). Fall back to the legacy synchronous flow
+        # so local uvicorn dev still works. Production always runs
+        # inside a Modal container so this branch is a dev convenience.
+        log.warning(
+            "Modal SDK unavailable — falling back to synchronous /api/analyze",
+            extra=log_extra,
+        )
+        return await _analyze_sync_fallback(video, goal, rid, cfg, log_extra)
+
+    t0 = time.perf_counter()
+    try:
+        video_bytes = await video.read()
+        if len(video_bytes) > cfg.max_upload_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=ValidationFailure(
+                    field="video",
+                    error=(
+                        f"upload {len(video_bytes)} bytes exceeds "
+                        f"max_upload_bytes={cfg.max_upload_bytes}"
+                    ),
+                ).model_dump(),
+            )
+        log.info(
+            "spawning analyze_blocking — size=%d",
+            len(video_bytes),
+            extra={**log_extra, "size_bytes": len(video_bytes)},
+        )
+
+        # Look up the deployed analyze_blocking function by app + name.
+        # Cached after first call, ~50ms.
+        analyze_fn = _modal.Function.from_name(
+            "aesthesis-orchestrator", "analyze_blocking",
+        )
+        call = analyze_fn.spawn(video_bytes, goal, rid)
+        spawn_ms = round((time.perf_counter() - t0) * 1000.0, 1)
+        log.info(
+            "analyze_blocking spawned — job_id=%s spawn_ms=%.1f",
+            call.object_id, spawn_ms,
+            extra={**log_extra, "job_id": call.object_id,
+                   "spawn_ms": spawn_ms},
+        )
+
+        return JSONResponse(
+            {"job_id": call.object_id, "run_id": rid, "status": "queued"},
+            headers={
+                "X-Aesthesis-Run-Id": rid,
+                "X-Aesthesis-Job-Id": call.object_id,
+            },
+        )
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        log.exception("failed to spawn analyze job", extra=log_extra)
+        raise HTTPException(
+            status_code=500,
+            detail=f"failed to spawn analyze job: {type(e).__name__}: {e}",
+        ) from e
+
+
+async def _analyze_sync_fallback(
+    video: UploadFile,
+    goal: str | None,
+    rid: str,
+    cfg: Any,
+    log_extra: dict,
+) -> JSONResponse:
+    """Legacy synchronous /api/analyze path. Used only when the Modal
+    SDK isn't available (local uvicorn dev). Production always uses
+    the spawn + poll flow because Modal's web proxy times out at 150s.
+    """
     run_dir = cfg.upload_dir / rid
     run_dir.mkdir(parents=True, exist_ok=True)
     path = run_dir / "video.mp4"
-
     t0 = time.perf_counter()
     try:
         with path.open("wb") as out:
             shutil.copyfileobj(video.file, out)
-        log.debug(
-            "upload persisted",
-            extra={**log_extra, "size_bytes": path.stat().st_size,
-                   "elapsed_ms": round((time.perf_counter() - t0) * 1000, 2)},
-        )
-
         response = await run_analysis(
             cfg=cfg, video=path, goal=goal, run_id=rid,
         )
@@ -282,46 +373,129 @@ async def analyze(
             },
         )
     except OrchestratorError as e:
-        log.warning("orchestrator validation failed: %s", e, extra=log_extra)
         raise HTTPException(
             status_code=e.status_code,
             detail=ValidationFailure(field=e.field, error=str(e)).model_dump(),
         ) from e
     except TribeServiceError as e:
-        log.error("TRIBE service error: %s", e, extra=log_extra)
         raise HTTPException(status_code=502, detail=str(e)) from e
     except GeminiQuotaExceededError as e:
-        # Daily/per-minute Gemini quota exceeded. Map to 503 with the
-        # suggested retry delay so the frontend can show a real error
-        # message ("Gemini quota exhausted, try again in N seconds")
-        # instead of letting it bubble as a generic 500 / connection
-        # drop. Daily exhaustion needs a model swap or billing upgrade
-        # — short retry_delay isn't enough.
-        log.error("Gemini quota exceeded: %s", e, extra=log_extra)
-        retry_after = (
-            f"{int(e.retry_delay_s) + 1}" if e.retry_delay_s else "60"
-        )
+        retry_after = f"{int(e.retry_delay_s) + 1}" if e.retry_delay_s else "60"
         raise HTTPException(
-            status_code=503,
-            detail=(
-                "Gemini API quota exhausted. Either wait for the quota to "
-                "reset or switch GEMINI_MODEL_INSIGHTS / "
-                "GEMINI_MODEL_VERDICT to a higher-quota model "
-                "(e.g. gemini-2.5-flash). "
-                f"Suggested retry: {retry_after}s."
-            ),
+            status_code=503, detail=str(e),
             headers={"Retry-After": retry_after},
         ) from e
     except Exception as e:  # noqa: BLE001
-        log.exception("unexpected error in /api/analyze", extra=log_extra)
-        raise HTTPException(status_code=500, detail=f"internal error: {e}") from e
+        log.exception("sync fallback failed", extra=log_extra)
+        raise HTTPException(
+            status_code=500, detail=f"internal error: {e}",
+        ) from e
     finally:
         if cfg.cleanup_uploads:
-            try:
-                shutil.rmtree(run_dir, ignore_errors=True)
-                log.debug("upload cleaned up", extra=log_extra)
-            except Exception:  # noqa: BLE001
-                log.warning("upload cleanup failed", exc_info=True, extra=log_extra)
+            shutil.rmtree(run_dir, ignore_errors=True)
+
+
+@app.get("/api/analyze/status/{job_id}")
+async def analyze_status(job_id: str) -> JSONResponse:
+    """Poll the status of a spawned analyze job.
+
+    Returns one of:
+      - ``{"status": "running"}`` — job not yet complete
+      - ``{"status": "done", "result": <AnalyzeResponse dict>}`` — finished
+      - ``{"status": "failed", "error": str}`` — analyze_blocking raised
+      - ``{"status": "expired", "error": str}`` — Modal GC'd the result
+
+    Each poll is a 50–200ms request — well under any proxy ceiling.
+    Browser polls every ~3s; gives up after 8 min.
+    """
+    log_extra = {"step": "status", "job_id": job_id}
+
+    if not _MODAL_AVAILABLE:
+        raise HTTPException(
+            status_code=501,
+            detail="status polling requires the Modal runtime (production only)",
+        )
+
+    try:
+        call = _modal.functions.FunctionCall.from_id(job_id)
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "invalid job_id %s: %s", job_id, e,
+            extra={**log_extra, "error_type": type(e).__name__},
+        )
+        raise HTTPException(status_code=404, detail=f"unknown job_id: {job_id}")
+
+    # Non-blocking poll. timeout=0 returns immediately if done; otherwise
+    # raises a Modal-side timeout exception (variant depending on SDK).
+    try:
+        result = call.get(timeout=0)
+    except _modal.exception.OutputExpiredError as e:  # type: ignore[attr-defined]
+        log.info("job_id %s result expired", job_id, extra=log_extra)
+        return JSONResponse(
+            {"status": "expired",
+             "error": "Result was garbage-collected by Modal (24h+). Re-run analyze."},
+            status_code=410,
+        )
+    except GeminiQuotaExceededError as e:
+        log.error(
+            "job_id %s Gemini quota exceeded — retry_delay=%s",
+            job_id, e.retry_delay_s, extra=log_extra,
+        )
+        retry_after = int(e.retry_delay_s) + 1 if e.retry_delay_s else 60
+        return JSONResponse(
+            {"status": "failed",
+             "error": (
+                 "Gemini API quota exhausted. Switch "
+                 "GEMINI_MODEL_INSIGHTS / GEMINI_MODEL_VERDICT to a "
+                 "higher-quota model (e.g. gemini-2.5-flash) or wait "
+                 f"~{retry_after}s for the per-minute window to reset."
+             ),
+             "retry_after_s": retry_after},
+        )
+    except TribeServiceError as e:
+        log.error("job_id %s TRIBE error: %s", job_id, e, extra=log_extra)
+        return JSONResponse({"status": "failed",
+                             "error": f"TRIBE service error: {e}"})
+    except OrchestratorError as e:
+        return JSONResponse({"status": "failed",
+                             "error": f"orchestrator error: {e}"})
+    except Exception as e:  # noqa: BLE001
+        # Modal raises a few flavors of timeout / RemoteError when
+        # get(timeout=0) finds the call still running. Distinguish
+        # by message — the still-running case is the common path.
+        msg = str(e)
+        msg_lower = msg.lower()
+        is_still_running = (
+            "did not complete" in msg_lower
+            or "still running" in msg_lower
+            or "timeout" in msg_lower
+            or msg == ""
+        )
+        type_name = type(e).__name__
+        # Modal-specific exception names that mean "not done yet".
+        if type_name in {
+            "FunctionTimeoutError",
+            "OutputTimeoutError",
+            "TimeoutError",
+        }:
+            is_still_running = True
+
+        if is_still_running:
+            return JSONResponse({"status": "running"})
+
+        log.exception(
+            "job_id %s failed with %s: %s",
+            job_id, type_name, msg, extra=log_extra,
+        )
+        return JSONResponse({"status": "failed",
+                             "error": f"{type_name}: {msg}"})
+
+    log.info(
+        "job_id %s done — n_insights=%d",
+        job_id, len(result.get("insights", [])) if isinstance(result, dict) else -1,
+        extra=log_extra,
+    )
+    return JSONResponse({"status": "done", "result": result})
 
 
 
