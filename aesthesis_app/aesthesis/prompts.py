@@ -81,6 +81,33 @@ Per-event output schema (one entry per event in the same order):
   ]
 }}
 
+Positive vs negative moments — IMPORTANT:
+
+Not every notable brain event is a problem to fix. Some moments are
+positive — things working well that the user should preserve. Examples:
+  - reward_anticipation rising on a CTA the user is about to click
+  - sustained motor_readiness during a checkout flow
+  - aesthetic_appeal + visual_fluency rising together on a hero
+  - flow_state windows
+  - trust_affinity rising on social proof
+
+For positive moments:
+  - Set ``proposed_change`` to null
+  - Set ``acceptance_criteria`` to []
+  - STILL identify ``target_element`` so the user knows WHAT worked
+  - Write the ``ux_observation`` in positive language ("the hero
+    composition pulls reward_anticipation cleanly")
+  - The frontend surfaces these as "working well — no change suggested";
+    no agent prompt is generated for them.
+
+For negative or actionable moments (friction spikes, cognitive load
+spikes, bounce_risk windows, troughs, surprise that reads as confusion,
+trust drops):
+  - Fill ``proposed_change`` and ``acceptance_criteria`` as specified.
+
+If the moment is genuinely neutral (a dominant_shift to nowhere
+notable), prefer to omit the insight rather than invent a fix.
+
 Hard constraints:
 
 1. ONE insight per event. Do not aggregate or summarize across events.

@@ -294,6 +294,65 @@ def test_unclear_render_strips_timestamps_and_jargon_section():
         assert needle not in out, f"unclear branch leaked {needle!r}"
 
 
+# ─── positive-moment branch ────────────────────────────────────────────────
+
+
+def test_positive_moment_renders_empty_prompt():
+    """When the analysis says 'this is working well' (proposed_change is
+    null but target is identified at actionable confidence), the
+    renderer MUST return an empty string. The frontend treats empty
+    agent_prompt as 'no fix suggested — show working-well callout'.
+    Generating a fix prompt for a positive moment would tell the agent
+    to 'fix' something that's working — actively harmful."""
+    ins = _standard_insight(proposed_change=None, acceptance_criteria=[])
+    assert render_agent_prompt(ins, goal=None) == ""
+
+
+def test_positive_moment_at_high_confidence_with_target():
+    """Positive routing requires: target identified, confidence >= 0.4,
+    no proposed_change. All three together."""
+    ins = _standard_insight(
+        proposed_change=None, acceptance_criteria=[], confidence=0.9,
+    )
+    assert ins.target_element is not None
+    assert ins.proposed_change is None
+    out = render_agent_prompt(ins, goal=None)
+    assert out == "", "positive moment should produce an empty prompt"
+
+
+def test_no_change_at_low_confidence_routes_to_unclear_not_positive():
+    """If confidence is low AND change is null, that's not 'positive' —
+    it's 'unclear, and we're not even sure what's going on'. The unclear
+    branch should still produce a prompt asking the agent to investigate."""
+    ins = _standard_insight(
+        proposed_change=None, acceptance_criteria=[], confidence=0.2,
+    )
+    out = render_agent_prompt(ins, goal=None)
+    assert out != ""
+    assert "investigate" in out.lower() or "Investigate" in out
+
+
+def test_no_change_with_unclear_label_routes_to_unclear():
+    """Even at high confidence, an 'unclear:' label means we couldn't
+    pin down the element. That's unclear, not positive."""
+    ins = _standard_insight(proposed_change=None, acceptance_criteria=[])
+    assert ins.target_element is not None
+    ins.target_element.label = "unclear: ambiguous moment"
+    out = render_agent_prompt(ins, goal=None)
+    assert out != ""
+    assert "Candidate elements" in out or "investigate" in out.lower()
+
+
+def test_no_change_with_no_target_routes_to_unclear():
+    """proposed_change is null AND target is null → can't be positive
+    (we don't even know what worked). Falls through to unclear."""
+    ins = _standard_insight(
+        target_element=None, proposed_change=None, acceptance_criteria=[],
+    )
+    out = render_agent_prompt(ins, goal=None)
+    assert out != ""
+
+
 def test_render_never_raises_on_minimal_insight():
     """Even a barely-populated insight must produce a non-empty string —
     the synthesizer's enrichment loop catches exceptions defensively, but

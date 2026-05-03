@@ -113,6 +113,32 @@ def _confidence_band(confidence: float, target: TargetElement | None) -> str:
     return "standard"
 
 
+def _is_positive_moment(insight: Insight) -> bool:
+    """A 'positive' moment is something working well — no change needed.
+
+    Signals (all must hold):
+      - The target element is identified (not 'unclear:').
+      - Confidence is at or above the actionable threshold (the
+        analysis pass committed to a target).
+      - No proposed change — Gemini explicitly emitted null because
+        nothing should change about the element.
+
+    For these, the renderer returns an empty agent_prompt and the
+    InsightCard shows a 'working well' callout instead of a fix
+    button. We refuse to generate a prompt that would tell an agent
+    to 'fix' a thing that's working.
+    """
+    if insight.proposed_change is not None:
+        return False
+    if _is_unclear_target(insight.target_element):
+        return False
+    if insight.target_element is None:
+        return False
+    if insight.confidence < 0.4:
+        return False
+    return True
+
+
 # ─── Branch templates ───────────────────────────────────────────────────────
 
 
@@ -304,12 +330,26 @@ analysis confidence was below the commit threshold.
 def render_agent_prompt(insight: Insight, *, goal: str | None) -> str:
     """Render the paste-into-coding-agent Markdown prompt.
 
-    Pulls the structured fields off ``insight`` and routes through one of
-    three branch templates. The unclear branch is used when confidence
-    is below 0.4 or the label is prefixed with "unclear:". This is the
-    public contract — the synthesizer calls this once per insight after
-    the Gemini insight call returns.
+    Returns an empty string for positive moments (nothing to fix) — the
+    InsightCard frontend treats empty agent_prompt as "no fix needed,
+    show the working-well callout instead." We refuse to generate a
+    prompt that tells an agent to "fix" something that's working.
+
+    For everything else, routes through one of three branches:
+      - standard: high confidence + change spec
+      - cautious: medium confidence + change spec ("verify before applying")
+      - unclear: low confidence OR label starts with "unclear:"
     """
+    if _is_positive_moment(insight):
+        log.debug(
+            "rendering agent prompt: positive moment — empty prompt",
+            extra={"step": "prompt_renderer", "band": "positive",
+                   "confidence": insight.confidence,
+                   "label": insight.target_element.label
+                   if insight.target_element else None},
+        )
+        return ""
+
     band = _confidence_band(insight.confidence, insight.target_element)
     log.debug(
         "rendering agent prompt",

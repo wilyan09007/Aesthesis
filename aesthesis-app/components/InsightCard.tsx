@@ -16,6 +16,8 @@ const ACCENT = "#E0454D"
 const VIOLET = "#a78bfa"
 const VIOLET_GLOW = "0 0 22px rgba(139,92,246,0.32), 0 0 48px rgba(139,92,246,0.14)"
 const AMBER = "#fbbf24"
+const TEAL = "#34D399"
+const TEAL_GLOW = "0 0 22px rgba(52,211,153,0.28), 0 0 48px rgba(52,211,153,0.12)"
 
 // "unclear:" label prefix marks low-confidence picks; the prompt's
 // unclear branch already handles them but the card flags them too so
@@ -26,10 +28,24 @@ function isUnclear(insight: Insight): boolean {
   return label.trim().toLowerCase().startsWith("unclear")
 }
 
-function confidenceBand(insight: Insight): "standard" | "cautious" | "unclear" {
+// Positive moments: target identified, confidence is actionable, but
+// no change was proposed (Gemini said "this is working — nothing to
+// fix"). For these we don't render a Copy-prompt button; we celebrate.
+function isPositive(insight: Insight): boolean {
+  if (insight.proposed_change != null) return false
+  if (isUnclear(insight)) return false
+  if (insight.target_element == null) return false
+  if (insight.confidence < 0.4) return false
+  return true
+}
+
+type Classification = "actionable" | "cautious" | "unclear" | "positive"
+
+function classifyInsight(insight: Insight): Classification {
   if (isUnclear(insight)) return "unclear"
+  if (isPositive(insight)) return "positive"
   if (insight.confidence < 0.7) return "cautious"
-  return "standard"
+  return "actionable"
 }
 
 export default function InsightCard({ insight, index, onSeek, runId, goal }: InsightCardProps) {
@@ -43,17 +59,19 @@ export default function InsightCard({ insight, index, onSeek, runId, goal }: Ins
   const [bbLoading, setBbLoading] = useState(false)
   const [bbError, setBbError] = useState<string | null>(null)
 
-  const band = confidenceBand(insight)
+  const classification = classifyInsight(insight)
   const target = insight.target_element
   const change = insight.proposed_change
   const annotated = insight.annotated_screenshot_b64
 
   const cardBorder =
-    band === "unclear"
+    classification === "unclear"
       ? `${AMBER}40`
-      : expanded
-        ? `${ACCENT}30`
-        : "rgba(255,255,255,0.06)"
+      : classification === "positive"
+        ? `${TEAL}40`
+        : expanded
+          ? `${ACCENT}30`
+          : "rgba(255,255,255,0.06)"
 
   const copyPrompt = async (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -154,23 +172,34 @@ export default function InsightCard({ insight, index, onSeek, runId, goal }: Ins
               <polygon points="5 3 19 12 5 21 5 3" />
             </svg>
           </button>
-          {band !== "standard" && (
+          {classification !== "actionable" && (
             <span
               className="px-1.5 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider"
               style={{
-                background: band === "unclear" ? `${AMBER}12` : "rgba(255,255,255,0.04)",
-                color: band === "unclear" ? AMBER : "rgba(255,255,255,0.55)",
-                border: band === "unclear"
-                  ? `1px solid ${AMBER}25`
-                  : "1px solid rgba(255,255,255,0.08)",
+                background:
+                  classification === "unclear" ? `${AMBER}12` :
+                  classification === "positive" ? `${TEAL}14` :
+                  "rgba(255,255,255,0.04)",
+                color:
+                  classification === "unclear" ? AMBER :
+                  classification === "positive" ? TEAL :
+                  "rgba(255,255,255,0.55)",
+                border:
+                  classification === "unclear" ? `1px solid ${AMBER}25` :
+                  classification === "positive" ? `1px solid ${TEAL}30` :
+                  "1px solid rgba(255,255,255,0.08)",
               }}
               title={
-                band === "unclear"
+                classification === "unclear"
                   ? "Low confidence — this prompt asks the agent to investigate rather than commit a fix"
-                  : "Medium confidence — verify the element matches before applying"
+                  : classification === "positive"
+                    ? "Working well — no change suggested. Preserve this."
+                    : "Medium confidence — verify the element matches before applying"
               }
             >
-              {band === "unclear" ? "low conf." : "verify"}
+              {classification === "unclear" ? "low conf."
+                : classification === "positive" ? "working well"
+                : "verify"}
             </span>
           )}
           <motion.svg
@@ -336,44 +365,68 @@ export default function InsightCard({ insight, index, onSeek, runId, goal }: Ins
                   </div>
                 )}
 
-                {/* Primary action: copy agent prompt */}
+                {/* Primary action area — diverges by classification */}
                 <div className="mt-3 pt-3 border-t flex flex-col gap-2" style={{ borderColor: "rgba(255,255,255,0.04)" }}>
-                  <button
-                    type="button"
-                    onClick={copyPrompt}
-                    disabled={!insight.agent_prompt}
-                    className="w-full px-3 py-2.5 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition-all hover:brightness-125 disabled:opacity-40 disabled:cursor-not-allowed"
-                    style={{
-                      background: copied
-                        ? `${VIOLET}30`
-                        : `${VIOLET}1f`,
-                      border: `1px solid ${VIOLET}55`,
-                      color: VIOLET,
-                      boxShadow: copied ? VIOLET_GLOW : undefined,
-                    }}
-                  >
-                    {copied ? (
-                      <>
-                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                          <path d="M20 6L9 17l-5-5" />
-                        </svg>
-                        Copied — paste into your AI agent
-                      </>
-                    ) : (
-                      <>
-                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-                          <rect x="9" y="9" width="13" height="13" rx="2" />
-                          <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
-                        </svg>
-                        Copy prompt for AI agent
-                      </>
-                    )}
-                  </button>
+                  {classification === "positive" ? (
+                    // Positive moments: no fix suggested — the brain told us
+                    // this is working. Show a "preserve this" callout
+                    // instead of a Copy-prompt button so the user doesn't
+                    // accidentally ask their agent to "fix" something
+                    // that's working.
+                    <div
+                      className="w-full px-3 py-2.5 rounded-lg text-xs font-medium flex items-center justify-center gap-2"
+                      style={{
+                        background: `${TEAL}14`,
+                        border: `1px solid ${TEAL}40`,
+                        color: TEAL,
+                        boxShadow: TEAL_GLOW,
+                      }}
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M20 6L9 17l-5-5" />
+                      </svg>
+                      Working well — no change suggested. Preserve this.
+                    </div>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={copyPrompt}
+                        disabled={!insight.agent_prompt}
+                        className="w-full px-3 py-2.5 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition-all hover:brightness-125 disabled:opacity-40 disabled:cursor-not-allowed"
+                        style={{
+                          background: copied
+                            ? `${VIOLET}30`
+                            : `${VIOLET}1f`,
+                          border: `1px solid ${VIOLET}55`,
+                          color: VIOLET,
+                          boxShadow: copied ? VIOLET_GLOW : undefined,
+                        }}
+                      >
+                        {copied ? (
+                          <>
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                              <path d="M20 6L9 17l-5-5" />
+                            </svg>
+                            Copied — paste into your AI agent
+                          </>
+                        ) : (
+                          <>
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                              <rect x="9" y="9" width="13" height="13" rx="2" />
+                              <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
+                            </svg>
+                            Copy prompt for AI agent
+                          </>
+                        )}
+                      </button>
 
-                  {copyError && (
-                    <p className="text-[10px] text-center" style={{ color: "#FF6B6B" }}>
-                      {copyError}
-                    </p>
+                      {copyError && (
+                        <p className="text-[10px] text-center" style={{ color: "#FF6B6B" }}>
+                          {copyError}
+                        </p>
+                      )}
+                    </>
                   )}
 
                   <div className="flex gap-2">
