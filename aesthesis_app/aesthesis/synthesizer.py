@@ -353,17 +353,19 @@ def _degraded_insight_from_event(event: Event) -> Insight:
         # unclear-branch prompt has at least one thing to anchor on.
         cited = list(dict.fromkeys([*cited, f"event_type:{event.type}"]))
 
+    # Note: timestamp_range_s is preserved on the model (the InsightCard UI
+    # surfaces it as a chip), but the rendered agent_prompt deliberately
+    # does NOT reference it — coding agents can't seek the recording.
     return Insight(
         timestamp_range_s=(event.timestamp_s, event.timestamp_s + 1.5),
         ux_observation=(
-            f"At t={event.timestamp_s:.1f}s, a {event.type} event fired in "
-            f"{roi}. The screenshot at this timestamp was not enough for "
-            "the analysis pass to commit to a specific element — investigate "
-            "the frame manually before applying any change."
+            f"A {event.type} event fired in {roi}. The screenshot was not "
+            "enough for the analysis pass to commit to a specific UI element "
+            "— investigate the moment with the user before applying any change."
         ),
-        recommendation="Investigate this moment in the screen recording.",
+        recommendation="Investigate this moment with the user.",
         cited_brain_features=cited,
-        cited_screen_moment=f"frame at t={event.timestamp_s:.1f}s",
+        cited_screen_moment="",  # avoid leaking a timestamp into prompt-adjacent fields
         target_element=None,
         proposed_change=None,
         acceptance_criteria=[],

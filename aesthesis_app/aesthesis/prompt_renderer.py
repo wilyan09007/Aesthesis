@@ -124,15 +124,33 @@ def _render_standard(
     goal: str | None,
     cautious: bool,
 ) -> str:
-    t0, t1 = insight.timestamp_range_s
+    """Render the standard / cautious branch of the agent prompt.
+
+    Important: the prompt is for a coding agent with access to the user's
+    source code only. It does NOT have access to the original video, the
+    brain timeline, or any timestamp-seekable context. So we deliberately
+    strip:
+      - timestamps (the agent can't seek the recording)
+      - raw brain feature keys (friction_anxiety, motor_readiness — neuroscience
+        jargon the agent won't act on usefully)
+      - cited_screen_moment (often "frame at t=10.5s" — useless context)
+
+    What we keep is what the agent CAN act on: a UX-language phrase for
+    the brain reaction (rendered by _phrase_brain_features), the textual
+    ux_observation, the element descriptors (visible text, location,
+    anchors), the change spec, and falsifiable acceptance criteria.
+
+    The InsightCard UI separately surfaces the timestamp + raw feature
+    pills for the human reading the prompt before pasting; the prompt
+    body stays clean for the agent.
+    """
     brain_phrase = _phrase_brain_features(insight.cited_brain_features)
-    obs_short = _short_summary(insight.ux_observation)
+    obs_short = _short_summary(insight.ux_observation) or insight.ux_observation
 
     visible_text_quoted = _quoted_or_fallback(target.visible_text)
     anchors_block = _bulletise(target.visual_anchors or [], prefix="  - ")
     criteria_block = _bulletise(insight.acceptance_criteria or [],
                                 prefix="- [ ] ")
-    cited_csv = ", ".join(insight.cited_brain_features) or "(none)"
     goal_line = (
         f"The user is specifically evaluating: \"{goal}\".\n\n"
         if goal else ""
@@ -154,27 +172,31 @@ def _render_standard(
     return f"""\
 # UX fix from neural-response analysis
 
-You are a coding agent. Implement this UI change in the user's codebase.
-The change is grounded in a brain-response analysis of a screen recording
-of the user's product — at the timestamp below, the viewer's brain showed
-{brain_phrase}, indicating {obs_short or insight.ux_observation}.
+You are a coding agent with access to the user's source code only. Implement
+the UI change described below. You do NOT have access to the original
+recording or the brain timeline — every fact you need to act on is in
+the descriptors and acceptance criteria, not in any external context.
+
+The neural-response analysis observed {brain_phrase} at this moment:
+{obs_short}
 {cautious_note}
 {goal_line}## What to change
 
 **Element:** {target.label}
 - **Type:** {target.element_type or 'element'}
 - **Visible text:** {visible_text_quoted}
-- **Location:** {target.location_hint or '(not specified)'}
+- **Location on screen:** {target.location_hint or '(not specified)'}
 - **Visual anchors (use these to find the element in source):**
 {anchors_block}
 
 **Reference screenshot:** see the attached image (the highlighted box
-marks the target element).
+marks the target element). If your harness doesn't render images, ignore
+the attachment and rely on the descriptors above.
 
 **Change ({change.change_type}):**
 - **Current state:** {change.current_state}
 - **Desired state:** {change.desired_state}
-- **Why this is the right move:** {change.rationale}
+- **Why:** {change.rationale}
 
 ## Acceptance criteria
 
@@ -194,12 +216,6 @@ The change is correct when all of the following hold:
 4. Apply the change. Preserve every existing prop / class / handler that
    isn't part of the diff.
 
-## Brain context (for your understanding, not a constraint)
-
-- Time window: {t0:.1f}s – {t1:.1f}s of the demo recording
-- Cited brain features: {cited_csv}
-- Screen moment: "{insight.cited_screen_moment}"
-
 If, after locating the element, you believe a different fix would
 better satisfy the acceptance criteria, prefer the criteria over the
 literal `desired_state` text — that text is one valid implementation,
@@ -214,7 +230,12 @@ def _render_unclear(
     change: ProposedChange | None,
     goal: str | None,
 ) -> str:
-    t0, t1 = insight.timestamp_range_s
+    """Render the low-confidence / 'investigate' branch.
+
+    Same constraint as _render_standard: agent has source-code access
+    only. No timestamp references, no raw brain-feature keys, no
+    "open the product to t=X" steps the agent can't perform.
+    """
     brain_phrase = _phrase_brain_features(insight.cited_brain_features)
 
     candidates = (target.visual_anchors if target else []) or [
@@ -227,7 +248,6 @@ def _render_unclear(
         else "- [ ] (no criteria — the brain signal didn't yield a "
              "falsifiable check)"
     )
-    cited_csv = ", ".join(insight.cited_brain_features) or "(none)"
     goal_line = (
         f"The user is specifically evaluating: \"{goal}\".\n\n"
         if goal else ""
@@ -245,13 +265,14 @@ def _render_unclear(
     return f"""\
 # UX investigation from neural-response analysis (low confidence)
 
-You are a coding agent. The brain analysis flagged a moment, but
-identifying the exact UI element from a screenshot was inconclusive.
-**Investigate before changing anything.** Below are the brain context,
-candidate elements, and acceptance criteria.
+You are a coding agent with access to the user's source code only. The
+neural-response analysis flagged a moment, but identifying the exact UI
+element from the screenshot was inconclusive. **Investigate before
+changing anything.** You do NOT have access to the recording — work from
+the candidate descriptions and acceptance criteria below.
 
-At t={t0:.1f}–{t1:.1f}s the viewer's brain showed {brain_phrase}, and the
-analysis observed: {insight.ux_observation}
+The neural-response analysis observed {brain_phrase}, and noted:
+{insight.ux_observation}
 
 {goal_line}## Candidate elements (verify which is actually the cause)
 
@@ -263,13 +284,14 @@ analysis observed: {insight.ux_observation}
 {change_block}
 ## Recommended workflow
 
-1. Open the user's product to the screen at roughly t={t0:.1f}s.
-2. For each candidate above, locate it in the codebase (search by
-   visible text or by location).
-3. Pick the one whose context best matches "{insight.cited_screen_moment}"
-   and the cited brain features ({cited_csv}).
-4. If unsure, ask the user to confirm before editing.
-5. Apply a change consistent with the acceptance criteria.
+1. For each candidate above, search the user's codebase for elements
+   matching its description — visible text first, then narrow by
+   surrounding landmarks.
+2. Pick the candidate whose surroundings best match the analysis
+   observation above.
+3. If unsure between two candidates, ask the user to confirm before
+   editing.
+4. Apply a change consistent with the acceptance criteria.
 
 This prompt is intentionally non-prescriptive because the original
 analysis confidence was below the commit threshold.

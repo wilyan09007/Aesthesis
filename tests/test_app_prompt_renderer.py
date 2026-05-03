@@ -237,6 +237,63 @@ def test_unclear_render_when_target_missing():
 # ─── escape hatches ─────────────────────────────────────────────────────────
 
 
+def test_standard_render_strips_timestamps():
+    """Coding agents can't seek the recording — the prompt body MUST NOT
+    reference video timestamps anywhere. Future cleanup passes that
+    accidentally re-add `{t0:.1f}s` or "Time window" to the template
+    will trip this test."""
+    ins = _standard_insight()
+    out = render_agent_prompt(ins, goal=None)
+    forbidden_substrings = [
+        "Time window",
+        "of the demo recording",
+        f"{ins.timestamp_range_s[0]:.1f}s",
+        f"{ins.timestamp_range_s[1]:.1f}s",
+        "at the timestamp below",
+        "Open the user's product to the screen at",
+    ]
+    for needle in forbidden_substrings:
+        assert needle not in out, (
+            f"prompt leaked timestamp-shaped string: {needle!r}"
+        )
+
+
+def test_standard_render_drops_raw_brain_feature_section():
+    """The renderer template MUST NOT emit a "Cited brain features"
+    section that lists raw feature keys verbatim. Gemini-authored
+    content (rationale, observation) may legitimately mention feature
+    names — the renderer can't police that — but the template itself
+    shouldn't be the source of neuroscience-jargon noise."""
+    ins = _standard_insight()
+    out = render_agent_prompt(ins, goal=None)
+    # Section headers the old template had + we don't want anymore.
+    forbidden_headers = [
+        "Cited brain features:",  # CSV-listed raw keys
+        "## Brain context",         # whole metadata footer
+        "Screen moment phrase:",    # the cited_screen_moment leak
+    ]
+    for header in forbidden_headers:
+        assert header not in out, (
+            f"prompt template still emits {header!r} — that section "
+            "leaks neuroscience metadata the agent can't act on"
+        )
+
+
+def test_unclear_render_strips_timestamps_and_jargon_section():
+    """Same template guarantees on the low-confidence branch."""
+    ins = _standard_insight(confidence=0.2)
+    out = render_agent_prompt(ins, goal=None)
+    forbidden = [
+        "Time window",
+        f"{ins.timestamp_range_s[0]:.1f}s",
+        "Open the user's product",
+        "Cited brain features:",
+        "## Brain context",
+    ]
+    for needle in forbidden:
+        assert needle not in out, f"unclear branch leaked {needle!r}"
+
+
 def test_render_never_raises_on_minimal_insight():
     """Even a barely-populated insight must produce a non-empty string —
     the synthesizer's enrichment loop catches exceptions defensively, but
