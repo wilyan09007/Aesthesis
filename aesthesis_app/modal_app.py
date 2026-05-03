@@ -44,6 +44,11 @@ image = (
         "python-multipart>=0.0.9",
         "ffmpeg-python>=0.2",
         "google-generativeai>=0.7",
+        # PIL drives the bbox overlay on per-insight annotated
+        # screenshots (aesthesis/annotate.py). Without it the overlay
+        # silently falls back to "no annotated screenshot" — agent
+        # prompts still render, but the user-facing image disappears.
+        "Pillow>=10.0",
     )
     .env({
         "UPLOAD_DIR": "/tmp/uploads",

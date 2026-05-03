@@ -11,6 +11,14 @@ so production tells us why a timestamp didn't extract. The previous
 ``"no ffmpeg"`` message conflated three different failure modes (binary
 missing, fast-seek lands past EOF, codec mismatch) and made it look like
 the image was misconfigured even when ffmpeg was healthy.
+
+Resolution: scaled to ``min(1600, native_width)``. Most screen recordings
+arrive at 1920x1080 or higher; capping at 1600 preserves enough pixel
+density that small UI elements (16-24px icons, dense table rows, tiny
+labels) stay legible to Gemini's vision pass while keeping payload size
+sane. The previous 800px cap dropped element-id recall on dense UIs —
+see ASSUMPTIONS_AGENT_PROMPT.md §21.2 for the resolution / token-cost
+analysis behind the bump.
 """
 
 from __future__ import annotations
@@ -56,7 +64,7 @@ def _ffmpeg_seek_extract(
             "-ss", f"{t_s:.3f}",
             "-i", str(video),
             "-frames:v", "1",
-            "-vf", "scale=800:-2",
+            "-vf", "scale='min(1600,iw)':-2",
             "-q:v", "5",
             str(out_path),
         ]
@@ -66,7 +74,7 @@ def _ffmpeg_seek_extract(
             "-i", str(video),
             "-ss", f"{t_s:.3f}",
             "-frames:v", "1",
-            "-vf", "scale=800:-2",
+            "-vf", "scale='min(1600,iw)':-2",
             "-q:v", "5",
             str(out_path),
         ]
@@ -123,7 +131,7 @@ def extract_frame(video: Path, t_s: float, out_path: Path) -> Path | None:
             (
                 ffmpeg
                 .input(str(video), ss=t_s)
-                .output(str(out_path), vframes=1, vf="scale=800:-2", **{"q:v": 5})
+                .output(str(out_path), vframes=1, vf="scale='min(1600,iw)':-2", **{"q:v": 5})
                 .overwrite_output()
                 .run(quiet=True)
             )

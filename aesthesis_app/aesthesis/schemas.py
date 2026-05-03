@@ -17,6 +17,15 @@ internal pipeline uses ``Event``, ``Insight``, ``AggregateMetric``,
 Pre-pivot history (A/B comparison) used a ``VersionTag = "A" | "B"``
 discriminator on every record + a ``Verdict`` block declaring a winner.
 That whole concept is gone — see DESIGN.md §17 for the rationale.
+
+Agent-prompt pipeline (ASSUMPTIONS_AGENT_PROMPT.md):
+    Each insight ships a paste-into-coding-agent Markdown prompt that
+    pinpoints the specific UI element responsible for the brain event,
+    states the change, and lists falsifiable acceptance criteria. The
+    nested ``TargetElement`` + ``ProposedChange`` types are the
+    structured source-of-truth; the rendered ``agent_prompt`` is a
+    deterministic Markdown view over them. Mirror this exactly in
+    aesthesis-app/lib/types.ts.
 """
 
 from __future__ import annotations
@@ -49,13 +58,65 @@ class Event(BaseModel):
     screenshot_b64: str | None = None    # included in Gemini payload only
 
 
+# ─── Agent-prompt nested types ──────────────────────────────────────────────
+
+
+class TargetElement(BaseModel):
+    """Vision-grounded description of the UI element that triggered the event.
+
+    Three converging anchors so an AI coding agent can locate the element
+    in the user's source code without further hints: ``visible_text``
+    (highest leverage — agents grep for strings reliably across any
+    framework), ``location_hint`` (semantic position), and
+    ``visual_anchors`` (sibling/parent context). Any single one might
+    fail (text rendered in a sprite, layout described ambiguously,
+    siblings not yet committed); the conjunction nearly always survives.
+
+    ``bbox_norm`` is for the user-facing annotated screenshot only — the
+    agent receives the textual descriptors, not coordinates. See
+    ASSUMPTIONS_AGENT_PROMPT.md §4.1 + §13.
+    """
+    label: str               # short human label, e.g. "Primary CTA — Start free trial"
+    element_type: str = "element"  # button, heading, image, modal, input, link, table, …
+    visible_text: str | None = None  # exact on-screen copy if any
+    location_hint: str = ""  # "upper-right of hero section"
+    visual_anchors: list[str] = Field(default_factory=list)
+    bbox_norm: tuple[float, float, float, float] | None = None
+    # [x0, y0, x1, y1] in 0..1 of the SCREENSHOT's pixel space.
+    # Used by annotate.py to draw the overlay; agents do not consume coords.
+
+
+class ProposedChange(BaseModel):
+    """Diff intent. Tight enough to be implementable, loose enough that the
+    agent can apply it idiomatically in the user's actual stack."""
+    change_type: Literal[
+        "copy", "layout", "hierarchy", "color", "spacing",
+        "typography", "interaction", "removal", "addition", "structure",
+    ] = "structure"
+    current_state: str       # "Button uses muted outline style with 12px label"
+    desired_state: str       # "Button uses filled primary background with 16px label"
+    rationale: str           # ties the change to the cited brain features
+
+
 class Insight(BaseModel):
-    """One Gemini insight per event (DESIGN.md §4.5 output schema)."""
+    """One Gemini insight per event, augmented with an agent-paste prompt.
+
+    ``recommendation`` stays as a derived one-liner so the existing chart
+    tooltip / hover labels keep working without a frontend rewrite. The
+    structured ``proposed_change`` is the source of truth.
+    """
     timestamp_range_s: tuple[float, float]
     ux_observation: str
     recommendation: str
     cited_brain_features: list[str]
     cited_screen_moment: str
+    # Agent-prompt augmentation (ASSUMPTIONS_AGENT_PROMPT.md §3).
+    target_element: TargetElement | None = None
+    proposed_change: ProposedChange | None = None
+    acceptance_criteria: list[str] = Field(default_factory=list)
+    confidence: float = 0.0  # 0..1, calibrated per ASSUMPTIONS_AGENT_PROMPT.md §21.8
+    agent_prompt: str = ""   # rendered Markdown the user pastes
+    annotated_screenshot_b64: str | None = None  # data-URI-ready JPEG bytes
 
 
 class AggregateMetric(BaseModel):

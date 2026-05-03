@@ -1,16 +1,32 @@
-"""Insight Synthesizer (DESIGN.md §4.5, post-pivot §17).
+"""Insight Synthesizer (DESIGN.md §4.5, post-pivot §17,
+agent-prompt restructure ASSUMPTIONS_AGENT_PROMPT.md).
 
 Two Gemini calls per analysis:
-    1. Per-event insights — Events + screenshots + goal -> insights JSON.
-    2. Overall assessment — Aggregate metrics + insights -> OverallAssessment.
+    1. Per-event structured insights — Events + screenshots + goal ->
+       Insight JSON with target_element + proposed_change +
+       acceptance_criteria + confidence, per ASSUMPTIONS_AGENT_PROMPT.md
+       §3-§5.
+    2. Overall assessment — Aggregate metrics + insights ->
+       OverallAssessment.
+
+Between the two calls, every insight is enriched server-side:
+  - Annotated screenshot generated via PIL bbox overlay (annotate.py),
+  - Final paste-into-coding-agent Markdown rendered deterministically
+    via the prompt_renderer module.
+
+Both enrichment steps are CPU-only and degradable: a per-event failure
+drops the overlay or the prompt for that one insight rather than
+failing the whole analysis. Verbose logging at every boundary —
+agent-prompt quality is the headline product feature, observability
+needs to surface failures without grepping per-event debug noise.
 
 Failures from Gemini (missing dependency, missing key, malformed JSON,
-schema mismatch) raise ``SynthesizerError``. The orchestrator surfaces these
-as a 500 to the caller.
+schema mismatch) raise ``SynthesizerError``. The orchestrator surfaces
+these as a 500 to the caller.
 
-Pre-pivot history: there used to be three calls (insights for A, insights
-for B, then a verdict that picked a winner). The pivot collapsed that to
-two single-subject calls — DESIGN.md §17.
+Pre-pivot history: there used to be three calls (insights for A,
+insights for B, then a verdict that picked a winner). The pivot
+collapsed that to two single-subject calls — DESIGN.md §17.
 """
 
 from __future__ import annotations
@@ -21,11 +37,20 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
+from .annotate import annotate_to_b64_jpeg
 from .config import AppConfig
+from .prompt_renderer import render_agent_prompt
 from .prompts import ASSESSMENT_PROMPT_TEMPLATE, INSIGHT_PROMPT_TEMPLATE
-from .schemas import AggregateMetric, Event, Insight, OverallAssessment
+from .schemas import (
+    AggregateMetric,
+    Event,
+    Insight,
+    OverallAssessment,
+    ProposedChange,
+    TargetElement,
+)
 
 log = logging.getLogger(__name__)
 
@@ -86,8 +111,10 @@ async def _call_gemini(prompt: str, *, cfg: AppConfig, model_name: str,
     log.info(
         "Gemini call",
         extra={"step": step, "run_id": run_id,
-               "model": model_name, "n_images": len(images or [])},
+               "model": model_name, "n_images": len(images or []),
+               "prompt_chars": len(prompt)},
     )
+    t0 = time.perf_counter()
     model = genai.GenerativeModel(model_name)
     # Disable SDK-level retries — fail fast so an empty/blocked response
     # surfaces immediately instead of stalling the request for ~70s while
@@ -99,7 +126,14 @@ async def _call_gemini(prompt: str, *, cfg: AppConfig, model_name: str,
                            "temperature": 0.2},
         request_options={"retry": no_retry},
     )
+    elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 1)
     text = _strip_code_fence(resp.text)
+    log.debug(
+        "Gemini response received",
+        extra={"step": step, "run_id": run_id,
+               "elapsed_ms": elapsed_ms,
+               "response_chars": len(text)},
+    )
     try:
         return json.loads(text)
     except json.JSONDecodeError as e:
@@ -119,9 +153,151 @@ def _serialize_event_for_prompt(e: Event) -> dict:
     }
 
 
-# ─── Step 1: per-event insights ──────────────────────────────────────────────
+# ─── Step 1: per-event structured insights ──────────────────────────────────
 
-async def _generate_insights(
+def _coerce_target_element(raw: Any) -> TargetElement | None:
+    """Defensive parse of Gemini's target_element block.
+
+    Gemini occasionally drops a field or returns a string for a list. We
+    salvage what we can and let the unclear-branch renderer take over
+    when the structure is too damaged.
+    """
+    if not isinstance(raw, dict):
+        return None
+    label = str(raw.get("label", "")).strip()
+    if not label:
+        # No label means we can't even render the unclear branch
+        # meaningfully — drop the structured part and let the renderer
+        # fall back further.
+        return None
+
+    visual_anchors = raw.get("visual_anchors") or []
+    if isinstance(visual_anchors, str):
+        visual_anchors = [visual_anchors]
+    visual_anchors = [str(a).strip() for a in visual_anchors if str(a).strip()]
+
+    bbox = raw.get("bbox_norm")
+    if bbox is not None:
+        try:
+            bbox = tuple(float(v) for v in bbox)
+            if len(bbox) != 4:
+                bbox = None
+        except (TypeError, ValueError):
+            bbox = None
+
+    visible_text = raw.get("visible_text")
+    if visible_text is not None:
+        visible_text = str(visible_text).strip() or None
+
+    return TargetElement(
+        label=label,
+        element_type=str(raw.get("element_type") or "element"),
+        visible_text=visible_text,
+        location_hint=str(raw.get("location_hint") or "").strip(),
+        visual_anchors=visual_anchors,
+        bbox_norm=bbox,
+    )
+
+
+def _coerce_proposed_change(raw: Any) -> ProposedChange | None:
+    if not isinstance(raw, dict):
+        return None
+    current_state = str(raw.get("current_state", "")).strip()
+    desired_state = str(raw.get("desired_state", "")).strip()
+    rationale = str(raw.get("rationale", "")).strip()
+    if not (current_state or desired_state):
+        return None
+
+    change_type = str(raw.get("change_type") or "structure").strip().lower()
+    valid = {"copy", "layout", "hierarchy", "color", "spacing",
+             "typography", "interaction", "removal", "addition", "structure"}
+    if change_type not in valid:
+        log.info(
+            "Gemini returned unknown change_type=%r — coercing to 'structure'",
+            change_type,
+            extra={"step": "synth.coerce"},
+        )
+        change_type = "structure"
+
+    return ProposedChange(
+        change_type=change_type,  # type: ignore[arg-type]
+        current_state=current_state,
+        desired_state=desired_state or current_state,
+        rationale=rationale,
+    )
+
+
+def _coerce_acceptance_criteria(raw: Any) -> list[str]:
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [str(c).strip() for c in raw if str(c).strip()]
+
+
+def _coerce_confidence(raw: Any) -> float:
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+    if v != v:  # NaN
+        return 0.0
+    if v > 1.0 and v <= 100.0:
+        v = v / 100.0  # Gemini sometimes uses 0..100 instead of 0..1
+    return max(0.0, min(1.0, v))
+
+
+def _build_insight_from_raw(entry: dict, idx: int, run_id: str) -> Insight | None:
+    """Translate one Gemini JSON entry into an Insight model.
+
+    Returns ``None`` only when the event truly carries nothing
+    actionable. Most failures degrade to the unclear-branch flow rather
+    than dropping the insight entirely.
+    """
+    try:
+        ts_range = entry["timestamp_range_s"]
+        t0 = float(ts_range[0])
+        t1 = float(ts_range[1])
+    except (KeyError, TypeError, ValueError, IndexError):
+        log.info(
+            "insight %d dropped — missing/malformed timestamp_range_s: %r",
+            idx, entry.get("timestamp_range_s"),
+            extra={"step": "synth.parse", "run_id": run_id, "insight_idx": idx},
+        )
+        return None
+
+    target = _coerce_target_element(entry.get("target_element"))
+    change = _coerce_proposed_change(entry.get("proposed_change"))
+    criteria = _coerce_acceptance_criteria(entry.get("acceptance_criteria"))
+    confidence = _coerce_confidence(entry.get("confidence", 0.0))
+
+    cited_features = entry.get("cited_brain_features") or []
+    if isinstance(cited_features, str):
+        cited_features = [cited_features]
+    cited_features = [str(f).strip() for f in cited_features if str(f).strip()]
+
+    recommendation = str(entry.get("recommendation") or "").strip()
+    if not recommendation and change is not None:
+        # Derive a one-line recommendation from the structured change
+        # so the existing chart hover tooltip keeps working.
+        recommendation = change.desired_state[:240]
+
+    return Insight(
+        timestamp_range_s=(t0, t1),
+        ux_observation=str(entry.get("ux_observation", "")).strip(),
+        recommendation=recommendation,
+        cited_brain_features=cited_features,
+        cited_screen_moment=str(entry.get("cited_screen_moment", "")).strip(),
+        target_element=target,
+        proposed_change=change,
+        acceptance_criteria=criteria,
+        confidence=confidence,
+        agent_prompt="",  # filled in by render step below
+        annotated_screenshot_b64=None,  # filled in by annotate step below
+    )
+
+
+async def _generate_structured_insights(
     events: list[Event],
     *,
     goal: str | None,
@@ -135,7 +311,7 @@ async def _generate_insights(
     """
     if not events:
         log.info("no events to synthesize — skipping Gemini",
-                 extra={"step": "gemini.insights", "run_id": run_id})
+                 extra={"step": "synth.insights", "run_id": run_id})
         return []
 
     events_serialized = [_serialize_event_for_prompt(e) for e in events]
@@ -151,28 +327,150 @@ async def _generate_insights(
         if e.screenshot_path and Path(e.screenshot_path).exists():
             try:
                 images.append(Path(e.screenshot_path).read_bytes())
-            except OSError:
+            except OSError as ex:
+                log.info(
+                    "could not read screenshot for t=%.2f: %s",
+                    e.timestamp_s, ex,
+                    extra={"step": "synth.insights", "run_id": run_id},
+                )
                 continue
+
+    log.info(
+        "synth: requesting %d structured insights (goal=%s, %d images attached)",
+        len(events), bool(goal), len(images),
+        extra={"step": "synth.insights", "run_id": run_id,
+               "n_events": len(events), "n_images": len(images)},
+    )
 
     raw = await _call_gemini(
         prompt, cfg=cfg, model_name=cfg.gemini_model_insights,
-        run_id=run_id, step="gemini.insights",
+        run_id=run_id, step="synth.insights",
         images=images or None,
     )
 
+    raw_insights = raw.get("insights", []) if isinstance(raw, dict) else []
+    log.debug(
+        "Gemini returned %d raw insight entries",
+        len(raw_insights),
+        extra={"step": "synth.insights", "run_id": run_id},
+    )
+
     out: list[Insight] = []
-    errors: list[str] = []
-    for entry in raw.get("insights", []):
-        try:
-            out.append(Insight(**entry))
-        except Exception as e:  # noqa: BLE001
-            errors.append(f"{entry}: {e}")
+    for idx, entry in enumerate(raw_insights):
+        if not isinstance(entry, dict):
+            log.info(
+                "insight %d dropped — non-object entry: %r",
+                idx, entry,
+                extra={"step": "synth.parse", "run_id": run_id,
+                       "insight_idx": idx},
+            )
+            continue
+        ins = _build_insight_from_raw(entry, idx, run_id)
+        if ins is not None:
+            out.append(ins)
+
     if not out:
         raise SynthesizerError(
             f"Gemini insight call returned 0 valid insights from "
-            f"{len(raw.get('insights', []))} entries. errors={errors}"
+            f"{len(raw_insights)} entries"
         )
+
+    log.info(
+        "synth: %d insights parsed (target_elements=%d, proposed_changes=%d, "
+        "criteria_avg=%.1f, mean_confidence=%.2f)",
+        len(out),
+        sum(1 for i in out if i.target_element is not None),
+        sum(1 for i in out if i.proposed_change is not None),
+        (sum(len(i.acceptance_criteria) for i in out) / len(out)) if out else 0.0,
+        (sum(i.confidence for i in out) / len(out)) if out else 0.0,
+        extra={"step": "synth.insights", "run_id": run_id,
+               "n_insights": len(out)},
+    )
+
     return out
+
+
+# ─── Step 1.5: enrichment — annotated screenshots + rendered prompts ────────
+
+def _enrich_insights(
+    insights: list[Insight],
+    events: list[Event],
+    *,
+    goal: str | None,
+    run_id: str,
+) -> None:
+    """Mutate insights in place, adding ``annotated_screenshot_b64`` and
+    ``agent_prompt`` fields. CPU-only — runs synchronously off the event
+    loop via ``asyncio.to_thread`` from the orchestrator.
+
+    Per-insight failures are non-fatal — a missing overlay or render
+    error degrades that one insight but never the whole run.
+    """
+    if not insights:
+        return
+
+    # Index events by approximate timestamp so we can locate the source
+    # screenshot for an insight from its timestamp_range_s start.
+    event_by_t: dict[float, Event] = {round(e.timestamp_s, 2): e for e in events}
+
+    n_annotated = 0
+    n_prompts = 0
+    n_unclear = 0
+    for idx, ins in enumerate(insights):
+        # Find the source event's screenshot. If we can't, the prompt is
+        # still rendered; only the annotated overlay is dropped.
+        screenshot_path: Path | None = None
+        if ins.target_element is not None and ins.target_element.bbox_norm is not None:
+            t_key = round(ins.timestamp_range_s[0], 2)
+            ev = event_by_t.get(t_key)
+            if ev is None:
+                # Fall back to nearest event
+                ev = min(
+                    events,
+                    key=lambda e: abs(e.timestamp_s - ins.timestamp_range_s[0]),
+                    default=None,
+                )
+            if ev is not None and ev.screenshot_path:
+                p = Path(ev.screenshot_path)
+                if p.exists():
+                    screenshot_path = p
+
+            if screenshot_path is not None:
+                ins.annotated_screenshot_b64 = annotate_to_b64_jpeg(
+                    screenshot_path,
+                    ins.target_element.bbox_norm,
+                    run_id=run_id,
+                    insight_idx=idx,
+                )
+                if ins.annotated_screenshot_b64:
+                    n_annotated += 1
+
+        try:
+            ins.agent_prompt = render_agent_prompt(ins, goal=goal)
+            n_prompts += 1
+            label = ins.target_element.label if ins.target_element else ""
+            if (
+                ins.confidence < 0.4
+                or (label or "").strip().lower().startswith("unclear")
+            ):
+                n_unclear += 1
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "prompt render failed for insight %d (%s: %s) — leaving "
+                "agent_prompt empty; frontend will hide the copy button.",
+                idx, type(e).__name__, e,
+                extra={"step": "synth.render", "run_id": run_id,
+                       "insight_idx": idx},
+            )
+
+    log.info(
+        "synth: enrichment done — %d/%d annotated, %d/%d prompts rendered, "
+        "%d unclear-branch",
+        n_annotated, len(insights), n_prompts, len(insights), n_unclear,
+        extra={"step": "synth.enrich", "run_id": run_id,
+               "n_annotated": n_annotated, "n_prompts": n_prompts,
+               "n_unclear": n_unclear, "n_insights": len(insights)},
+    )
 
 
 # ─── Step 2: absolute aggregate metrics ──────────────────────────────────────
@@ -295,7 +593,20 @@ async def _generate_overall_assessment(
     run_id: str,
 ) -> OverallAssessment:
     metrics_block = json.dumps([m.model_dump() for m in metrics], indent=2)
-    insights_json = json.dumps([i.model_dump() for i in insights], indent=2)
+    # Strip the heavy fields (annotated_screenshot_b64, agent_prompt) so
+    # the assessment prompt stays small. Those fields are for the
+    # frontend, not for assessment grounding.
+    insights_for_assessment = [
+        {
+            "timestamp_range_s": list(i.timestamp_range_s),
+            "ux_observation": i.ux_observation,
+            "recommendation": i.recommendation,
+            "cited_brain_features": i.cited_brain_features,
+            "cited_screen_moment": i.cited_screen_moment,
+        }
+        for i in insights
+    ]
+    insights_json = json.dumps(insights_for_assessment, indent=2)
     prompt = ASSESSMENT_PROMPT_TEMPLATE.format(
         goal=goal or "general first-impression evaluation",
         metrics_table_json=metrics_block,
@@ -303,7 +614,7 @@ async def _generate_overall_assessment(
     )
     raw = await _call_gemini(
         prompt, cfg=cfg, model_name=cfg.gemini_model_verdict,
-        run_id=run_id, step="gemini.assessment",
+        run_id=run_id, step="synth.assessment",
     )
     try:
         return OverallAssessment(**raw)
@@ -323,17 +634,26 @@ async def synthesize(
     cfg: AppConfig,
     run_id: str,
 ) -> SynthesisResult:
-    """Run the full synthesizer: per-event insights, then overall assessment."""
+    """Run the full synthesizer: structured insights + enrichment + assessment."""
     log.info(
         "synthesize begin",
-        extra={"step": "synth", "run_id": run_id, "n_events": len(events)},
+        extra={"step": "synth", "run_id": run_id, "n_events": len(events),
+               "goal_present": goal is not None},
     )
 
     t0 = time.perf_counter()
-    insights = await _generate_insights(
+    insights = await _generate_structured_insights(
         events, goal=goal, cfg=cfg, run_id=run_id,
     )
     insights_ms = (time.perf_counter() - t0) * 1000.0
+
+    # CPU-only enrichment: bbox overlay + Markdown prompt rendering.
+    # Runs inline on the asyncio thread — both are fast (<200ms total
+    # for 15 insights at 1600px screenshots) and we want them sequenced
+    # before the assessment prompt is built.
+    t_enrich = time.perf_counter()
+    _enrich_insights(insights, events, goal=goal, run_id=run_id)
+    enrich_ms = (time.perf_counter() - t_enrich) * 1000.0
 
     metrics = _compute_aggregate_metrics(timeline)
 
@@ -347,7 +667,10 @@ async def synthesize(
         "synthesize done",
         extra={"step": "synth", "run_id": run_id,
                "n_insights": len(insights),
-               "elapsed_ms": round(insights_ms + assessment_ms, 2)},
+               "insights_ms": round(insights_ms, 2),
+               "enrich_ms": round(enrich_ms, 2),
+               "assessment_ms": round(assessment_ms, 2),
+               "total_synth_ms": round(insights_ms + enrich_ms + assessment_ms, 2)},
     )
     return SynthesisResult(
         insights=insights,

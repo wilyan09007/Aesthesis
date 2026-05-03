@@ -1,8 +1,12 @@
-"""Prompts for the Insight Synthesizer (DESIGN.md §4.5, post-pivot §17).
+"""Prompts for the Insight Synthesizer (DESIGN.md §4.5, post-pivot §17,
+agent-prompt restructure ASSUMPTIONS_AGENT_PROMPT.md).
 
 Two prompts:
 - ``INSIGHT_PROMPT_TEMPLATE``: per-demo. Gemini sees the event records +
-  per-event screenshots + the user's stated goal; emits 1 insight per event.
+  per-event screenshots + the user's stated goal; emits one structured
+  insight per event including a vision-grounded ``target_element``,
+  ``proposed_change``, ``acceptance_criteria``, and a calibrated
+  ``confidence`` score.
 - ``ASSESSMENT_PROMPT_TEMPLATE``: holistic. Gemini sees the per-event
   insights + the absolute aggregate metrics; emits an ``OverallAssessment``
   JSON (summary + top_strengths + top_concerns + decisive_moment).
@@ -11,6 +15,11 @@ Both are formatted with ``.format(...)`` and the response is required to be
 valid JSON. The synthesizer code handles repair / re-prompting if the
 output is malformed.
 
+The structured insight schema is the input to the deterministic Markdown
+prompt renderer in ``prompt_renderer.py``. The renderer composes the
+final paste-into-coding-agent string from these fields without an extra
+LLM call — same input → same prompt, version-controllable.
+
 Pre-pivot history: there used to be a ``VERDICT_PROMPT_TEMPLATE`` that
 compared Version A and Version B and declared a winner. That whole frame
 disappeared with the single-video pivot — DESIGN.md §17.
@@ -18,47 +27,102 @@ disappeared with the single-video pivot — DESIGN.md §17.
 
 INSIGHT_PROMPT_TEMPLATE = """\
 You are analyzing how a first-time visitor's brain responded to a website
-demo. The user's stated goal was: "{goal}".
+demo. The user is specifically evaluating: "{goal}".
 
-You will see {n_events} brain events from a 30-second screen recording. Each
-event includes the brain signal that fired, the screenshot at that moment,
-and what the user (an AI agent acting as a real user) did just before.
+You will see {n_events} brain events from a 30-second screen recording. For
+each event you will see a screenshot of the exact frame at the event
+timestamp plus the brain features that fired. Your job is to identify
+the single UI element on screen most likely to have caused the brain
+response and propose a concrete, implementable fix.
 
-Your job: for each event, produce ONE insight in this format:
-- ux_observation: one sentence explaining what on the screen likely caused
-  this brain response. Be concrete — name the UI element, the copy, the
-  layout choice.
-- recommendation: one sentence with a specific, implementable change.
-- cited_brain_features: list of the brain feature keys you used.
-- cited_screen_moment: one phrase describing the visible UI moment.
+Brain feature → "look for" reference (use this to constrain element pick):
+- friction_anxiety: dense, confusing, error-stating, or contradictory copy/controls
+- cognitive_load: high-information regions (dense tables, walls of text, complex forms)
+- aesthetic_appeal (low): visually broken layouts, clashing typography, unbalanced composition
+- trust_affinity (low): sketchy patterns, missing trust signals
+- reward_anticipation (high): CTAs, value props, demo-starts, pricing reveals
+- motor_readiness (high): buttons / clickable elements the user is about to act on
+- surprise_novelty: modals, layout shifts, unexpected animations
+- visual_fluency (low): low-contrast text, weird fonts, broken hierarchy
 
-Hard constraints:
-- One insight per event. Do not aggregate or summarize across events.
-- Each insight MUST cite at least one brain feature key.
-- Each recommendation MUST be concrete enough that an engineer could
-  implement it without asking questions. "Improve UX" is not a
-  recommendation; "move the trial CTA above the fold and increase its
-  weight to match the paid tiers" is.
-- Do NOT use product-marketing language. No "delightful," "intuitive,"
-  "seamless," "frictionless," "leverage," "robust."
-- Do NOT speculate beyond what the brain features support. If fear spiked
-  but you can't tell from the screenshot why, say "screenshot does not
-  reveal cause; possible candidates: X, Y."
-- Output valid JSON conforming exactly to the output schema. No prose
-  outside the JSON.
+Goal-as-prior: when choosing the target element, prefer elements
+directly related to "{goal}" over peripheral ones, UNLESS the brain
+signal clearly points elsewhere.
 
-Output schema:
+Per-event output schema (one entry per event in the same order):
 {{
   "insights": [
     {{
       "timestamp_range_s": [start_s, end_s],
-      "ux_observation": "...",
-      "recommendation": "...",
+      "ux_observation": "one sentence — what on screen likely caused the brain response",
+      "recommendation": "one sentence — short fix summary (legacy field; the structured proposed_change below is the source of truth)",
       "cited_brain_features": ["..."],
-      "cited_screen_moment": "..."
+      "cited_screen_moment": "one phrase describing the visible UI moment",
+      "target_element": {{
+        "label": "short human label, e.g. 'Primary CTA — Start free trial'",
+        "element_type": "button | heading | image | modal | input | link | table | icon | section | other",
+        "visible_text": "exact on-screen characters of the element, or null if no readable text",
+        "location_hint": "semantic location, e.g. 'upper-right of hero section', '3rd row of pricing table'",
+        "visual_anchors": ["1-3 surrounding cues, e.g. 'under \\"Pricing\\" heading', 'right of trial CTA'"],
+        "bbox_norm": [x0, y0, x1, y1]
+      }},
+      "proposed_change": {{
+        "change_type": "copy | layout | hierarchy | color | spacing | typography | interaction | removal | addition | structure",
+        "current_state": "describe the element's current visual/behavioral state",
+        "desired_state": "describe the target state in concrete terms — copy text, sizes, weights, layout direction, etc.",
+        "rationale": "tie the change to the cited brain features in 1 sentence"
+      }},
+      "acceptance_criteria": [
+        "2-4 falsifiable bullets — each one testable by inspecting the final UI without re-running the brain analysis",
+        "Bad: 'feels trustworthy'. Good: 'the primary CTA has higher contrast than every secondary action in the same viewport'."
+      ],
+      "confidence": 0.0
     }}
   ]
 }}
+
+Hard constraints:
+
+1. ONE insight per event. Do not aggregate or summarize across events.
+
+2. Element grounding is MANDATORY. For every event, identify the single
+   most likely UI element on screen. If the screenshot is too ambiguous
+   to commit to one element, set ``target_element.label`` to a phrase
+   beginning with "unclear: " and place 2 candidate descriptions in
+   ``visual_anchors``. Do NOT skip the field.
+
+3. ``visible_text`` MUST be the exact characters on the element if any
+   are visible — do not paraphrase. If the element is a glyph / icon /
+   image / chart with no readable copy, set ``visible_text`` to null.
+
+4. ``bbox_norm`` must be ``[x0, y0, x1, y1]`` floats in [0, 1] of the
+   screenshot frame. ``[0, 0]`` is top-left. Tighten the box around the
+   element — do NOT wrap an entire section if a single button is the
+   actual target. If you cannot localise, set ``bbox_norm`` to null.
+
+5. ``acceptance_criteria`` MUST contain 2 to 4 entries. Each must be
+   falsifiable — testable by inspecting the final UI. No vague entries
+   like "feels intuitive".
+
+6. ``confidence`` calibration:
+   - 0.9-1.0: visible_text is clear + element type unambiguous + bbox tight
+   - 0.7-0.9: clear winner among 2 candidates
+   - 0.4-0.7: plausible but ambiguous; multiple elements could explain the signal
+   - 0.0-0.4: no clear signal-element match; do not commit (use the unclear label)
+
+7. ``change_type`` MUST be one of the listed enum values. If the right
+   word doesn't fit, use "structure" (catch-all).
+
+8. Do NOT use product-marketing language anywhere. No "delightful,"
+   "intuitive," "seamless," "frictionless," "leverage," "robust."
+
+9. Do NOT speculate beyond what the brain features support. If a signal
+   fired but the screenshot is uninformative, mark the target as
+   "unclear: ..." with confidence < 0.4 — the unclear branch is the
+   honest answer, not a failure.
+
+10. Output valid JSON conforming exactly to the schema above. No prose
+    outside the JSON.
 
 Events JSON:
 {events_json}

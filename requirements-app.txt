@@ -13,6 +13,9 @@ httpx>=0.27
 # Video validation + screenshot extraction
 ffmpeg-python>=0.2
 
+# Bounding-box overlay on per-insight screenshots (annotate.py)
+Pillow>=10.0
+
 # LLM
 google-generativeai>=0.7
 
