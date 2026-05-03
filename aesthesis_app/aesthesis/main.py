@@ -13,8 +13,10 @@ comparison. The pivot to single-video collapsed it — see DESIGN.md §17.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
+import subprocess
 import time
 import uuid
 from pathlib import Path
@@ -117,25 +119,124 @@ async def health() -> dict[str, Any]:
 
 @app.get("/api/warmup")
 async def warmup() -> dict[str, Any]:
-    """Wake the Tribe GPU container ahead of an /api/analyze call.
+    """Wake the Tribe GPU container AND load the model ahead of analyze.
 
-    The frontend fires this on landing-page mount so the user's actual
-    upload doesn't pay the cold-start tax. Tribe cold start is ~30-60s
-    (V-JEPA-2 weights + masks + neuro signatures); the proxy on Modal
-    has a 150s sync timeout, so a cold first analyze can fail. This
-    endpoint waits long enough to actually prime the container, then
-    returns. Fire-and-forget from the client.
+    Sends a tiny synthetic 3-second MP4 to Tribe's /process_video_timeline
+    so the TRIBE v2 + V-JEPA-2 weights load during landing-page mount
+    instead of inside the user's first analyze call. Without this, a
+    cold first analyze pays:
+      - ~28s of TRIBE v2 + V-JEPA-2 weight loading (first inference only)
+      - the actual V-JEPA encoding work for the user's video
+      - orchestrator post-processing + 2 Gemini calls
+    On videos > ~30s, the combined wall time exceeds Modal's ~150s sync
+    web-proxy timeout — the proxy drops the connection and the browser
+    sees `TypeError: Failed to fetch`, even though Tribe is still
+    happily processing on the other side.
+
+    Pinging /health alone (the previous warmup behavior) wakes the
+    container but does NOT trigger model load — Tribe loads weights
+    lazily on the first inference call. So we have to send a real (if
+    tiny) inference to pay the model-load cost up front.
+
+    The synthetic MP4 is generated via ffmpeg lavfi (testsrc, 320x240,
+    3s @ 10fps, ~50KB H.264). Tribe inference on this clip is ~3-8s
+    once the model is loaded; the first call from cold pays ~30-50s.
+
+    Fire-and-forget from the client. Always returns 200 with a body
+    describing the outcome; the frontend's prewarmTribe() ignores
+    failures since they just mean the user's first analyze pays the
+    cold-start tax instead.
     """
+    cfg = get_config()
     t0 = time.perf_counter()
+
+    # Step 1: synthesize a tiny MP4 via ffmpeg lavfi (no fixture file
+    # on disk). Same pattern the screenshot test suite uses — we know
+    # ffmpeg can generate a valid H.264 MP4 from this command line.
+    tmp_path = cfg.upload_dir / f"warmup-{uuid.uuid4().hex[:8]}.mp4"
     try:
-        await TribeClient(get_config().tribe_service_url, timeout_s=120).health()
+        cmd = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi",
+            "-i", "testsrc=duration=3:size=320x240:rate=10",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            str(tmp_path),
+        ]
+        res = await asyncio.to_thread(
+            subprocess.run, cmd, capture_output=True, timeout=15,
+        )
+        if res.returncode != 0 or not tmp_path.exists():
+            err = res.stderr.decode(errors="replace")[:300] if res.stderr else "no stderr"
+            elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 1)
+            log.warning(
+                "warmup mp4 synth failed (rc=%d): %s",
+                res.returncode, err,
+                extra={"step": "warmup", "elapsed_ms": elapsed_ms,
+                       "stage": "synth"},
+            )
+            return {
+                "ok": False, "stage": "synth", "error": err,
+                "elapsed_ms": elapsed_ms,
+            }
+        log.debug(
+            "warmup mp4 synthesized",
+            extra={"step": "warmup", "stage": "synth",
+                   "path": str(tmp_path),
+                   "size_bytes": tmp_path.stat().st_size},
+        )
+    except Exception as e:  # noqa: BLE001
         elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 1)
-        log.info("warmup ok", extra={"step": "warmup", "elapsed_ms": elapsed_ms})
+        log.warning(
+            "warmup mp4 synth raised: %s", e,
+            extra={"step": "warmup", "elapsed_ms": elapsed_ms,
+                   "stage": "synth", "error_type": type(e).__name__},
+        )
+        return {
+            "ok": False, "stage": "synth", "error": str(e),
+            "elapsed_ms": elapsed_ms,
+        }
+
+    # Step 2: real inference call against Tribe — this is the load-bearing
+    # step that triggers model load. Long timeout: cold-start can be
+    # 30-60s of weight load + a few seconds of inference.
+    warmup_run_id = f"warmup-{uuid.uuid4().hex[:8]}"
+    try:
+        client = TribeClient(cfg.tribe_service_url, timeout_s=240)
+        log.info(
+            "warmup posting tiny clip to Tribe",
+            extra={"step": "warmup", "stage": "tribe",
+                   "run_id": warmup_run_id,
+                   "tribe_url": cfg.tribe_service_url,
+                   "size_bytes": tmp_path.stat().st_size},
+        )
+        await client.process_video_timeline(tmp_path, run_id=warmup_run_id)
+        elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 1)
+        log.info(
+            "warmup ok (Tribe model loaded)",
+            extra={"step": "warmup", "stage": "tribe",
+                   "run_id": warmup_run_id, "elapsed_ms": elapsed_ms},
+        )
         return {"ok": True, "elapsed_ms": elapsed_ms}
     except Exception as e:  # noqa: BLE001
         elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 1)
-        log.warning("warmup failed: %s", e, extra={"step": "warmup", "elapsed_ms": elapsed_ms})
-        return {"ok": False, "error": str(e), "elapsed_ms": elapsed_ms}
+        log.warning(
+            "warmup tribe call failed: %s", e,
+            extra={"step": "warmup", "stage": "tribe",
+                   "run_id": warmup_run_id, "elapsed_ms": elapsed_ms,
+                   "error_type": type(e).__name__},
+        )
+        return {
+            "ok": False, "stage": "tribe", "error": str(e),
+            "elapsed_ms": elapsed_ms,
+        }
+    finally:
+        # Best-effort cleanup of the synthetic MP4. unlink(missing_ok=True)
+        # requires Python 3.8+; we're on 3.11. Wrap in try/except anyway
+        # so a stray permission glitch doesn't crash the warmup endpoint.
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 @app.post("/api/analyze")
