@@ -41,12 +41,56 @@ export type Frame = {
 
 // ── Wire types (mirror schemas.py exactly) ─────────────────────────────────
 
+// Vision-grounded UI element description. Three converging anchors —
+// visible_text, location_hint, visual_anchors — let a coding agent
+// locate the element in source without access to the user's repo. See
+// ASSUMPTIONS_AGENT_PROMPT.md §13 for the failure-mode taxonomy this
+// schema is designed to defeat.
+export type TargetElement = {
+  label: string
+  element_type: string
+  visible_text: string | null
+  location_hint: string
+  visual_anchors: string[]
+  bbox_norm: [number, number, number, number] | null
+}
+
+// Diff intent. `change_type` matches the backend Literal exactly —
+// keep these enums in lockstep when the backend list changes.
+export type ChangeType =
+  | "copy"
+  | "layout"
+  | "hierarchy"
+  | "color"
+  | "spacing"
+  | "typography"
+  | "interaction"
+  | "removal"
+  | "addition"
+  | "structure"
+
+export type ProposedChange = {
+  change_type: ChangeType
+  current_state: string
+  desired_state: string
+  rationale: string
+}
+
 export type Insight = {
   timestamp_range_s: [number, number]
   ux_observation: string
   recommendation: string
   cited_brain_features: string[]
   cited_screen_moment: string
+  // Agent-prompt augmentation. `agent_prompt` is the deterministic
+  // Markdown the user pastes into Claude Code / Cursor. The structured
+  // fields back the inline display in InsightCard.
+  target_element: TargetElement | null
+  proposed_change: ProposedChange | null
+  acceptance_criteria: string[]
+  confidence: number
+  agent_prompt: string
+  annotated_screenshot_b64: string | null
 }
 
 export type Event = {
