@@ -116,37 +116,68 @@ def test_extract_frame_does_not_raise_on_garbage_video(tmp_path: Path):
 
 # ─── Fast vs slow seek paths ─────────────────────────────────────────────────
 
-def test_fast_seek_succeeds_well_inside_video(tmp_path: Path):
+def test_combined_seek_succeeds_well_inside_video(tmp_path: Path):
+    """Combined seek (pre-seek to t-1s + decode forward) is the new
+    default. Fast AND frame-exact — fixes the off-by-keyframe bug
+    where pure fast-seek silently landed on a frame up to ~1s earlier."""
     video = _make_test_video(tmp_path / "src.mp4", duration_s=5.0)
-    out = tmp_path / "fast.jpg"
-    ok, err = _ffmpeg_seek_extract(video, 2.0, out, fast_seek=True)
-    assert ok, f"fast seek failed mid-video: {err}"
+    out = tmp_path / "combined.jpg"
+    ok, err = _ffmpeg_seek_extract(video, 2.0, out, mode="combined")
+    assert ok, f"combined seek failed mid-video: {err}"
     assert out.exists() and out.stat().st_size > 0
 
 
 def test_slow_seek_succeeds_well_inside_video(tmp_path: Path):
-    """Slow seek (-ss after -i) is the fallback for near-EOF timestamps
-    where fast seek can't land on a keyframe."""
+    """Slow seek (-ss after -i) is the last-resort fallback for cases
+    where combined seek can't land — e.g., timestamps very close to EOF.
+    Decodes from frame 0; always exact."""
     video = _make_test_video(tmp_path / "src.mp4", duration_s=5.0)
     out = tmp_path / "slow.jpg"
-    ok, err = _ffmpeg_seek_extract(video, 2.0, out, fast_seek=False)
+    ok, err = _ffmpeg_seek_extract(video, 2.0, out, mode="slow")
     assert ok, f"slow seek failed mid-video: {err}"
     assert out.exists() and out.stat().st_size > 0
 
 
 def test_seek_past_eof_returns_failure(tmp_path: Path):
-    """Both seek modes report failure with an error excerpt rather than
-    raising, so the orchestrator's per-event try/except sees a clean
-    ``(False, msg)`` and the rest of the events still get screenshotted."""
+    """Every seek mode must report failure with an error excerpt rather
+    than raising, so the orchestrator's per-event try/except sees a
+    clean ``(False, msg)`` and the rest of the events still get
+    screenshotted."""
     video = _make_test_video(tmp_path / "src.mp4", duration_s=2.0)
     out = tmp_path / "eof.jpg"
-    ok_fast, err_fast = _ffmpeg_seek_extract(video, 999.0, out, fast_seek=True)
-    ok_slow, err_slow = _ffmpeg_seek_extract(video, 999.0, out, fast_seek=False)
-    assert ok_fast is False
+    ok_combined, err_combined = _ffmpeg_seek_extract(video, 999.0, out, mode="combined")
+    ok_slow, err_slow = _ffmpeg_seek_extract(video, 999.0, out, mode="slow")
+    assert ok_combined is False
     assert ok_slow is False
     # The error message should give the operator something to grep —
     # not the empty string.
-    assert err_fast or err_slow
+    assert err_combined or err_slow
+
+
+def test_combined_seek_is_frame_exact_within_a_few_frames(tmp_path: Path):
+    """Regression guard for the off-by-keyframe bug. testsrc renders a
+    second-counter; the frame at t=3.0s should clearly be from second
+    3, not second 2 (which is what pure fast-seek would have given on
+    a GOP-30 stream). We verify by re-extracting with the slow mode
+    (always exact) and checking the file sizes are within a small
+    margin — same scene, same compression target, ergo similar bytes.
+    A keyframe-earlier frame would be a different scene image."""
+    video = _make_test_video(tmp_path / "src.mp4", duration_s=6.0)
+    combined_out = tmp_path / "combined.jpg"
+    slow_out = tmp_path / "slow.jpg"
+    ok_c, _ = _ffmpeg_seek_extract(video, 3.0, combined_out, mode="combined")
+    ok_s, _ = _ffmpeg_seek_extract(video, 3.0, slow_out, mode="slow")
+    assert ok_c and ok_s
+    # Both should land on the same frame; their JPEG sizes should be
+    # within ~25%. Pure fast-seek would land 1s earlier and produce a
+    # noticeably different testsrc frame (different counter digits).
+    sz_c = combined_out.stat().st_size
+    sz_s = slow_out.stat().st_size
+    ratio = max(sz_c, sz_s) / max(1, min(sz_c, sz_s))
+    assert ratio < 1.25, (
+        f"combined seek diverged from slow seek (ratio={ratio:.2f}) — "
+        "likely fell back to keyframe-earlier behavior"
+    )
 
 
 def test_run_ffmpeg_cli_falls_back_to_slow_seek(tmp_path: Path):

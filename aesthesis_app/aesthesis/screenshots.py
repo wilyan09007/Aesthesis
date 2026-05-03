@@ -46,38 +46,72 @@ def _truncate_stderr(b: bytes, n: int = 300) -> str:
     return s if len(s) <= n else s[:n] + f" […+{len(s)-n} more]"
 
 
+#: Pre-seek window for the combined fast-and-accurate seek mode. We
+#: keyframe-seek to (t - this) then decode forward by exactly this many
+#: seconds. 1.0s is enough to clear the typical screen-recording GOP
+#: (~30 frames at 30fps) without paying for a full from-start decode.
+_COMBINED_SEEK_PRE_S: float = 1.0
+
+
 def _ffmpeg_seek_extract(
-    video: Path, t_s: float, out_path: Path, *, fast_seek: bool,
+    video: Path, t_s: float, out_path: Path, *, mode: str,
 ) -> tuple[bool, str]:
     """Run ffmpeg to extract one frame at ``t_s``.
 
-    ``fast_seek=True``  → ``-ss`` before ``-i`` (sub-second, may land on a
-                          keyframe up to ~1 GOP earlier; can fail near EOF).
-    ``fast_seek=False`` → ``-ss`` after ``-i`` (decodes from t=0 to t_s, slower
-                          but exact and never misses near-EOF frames).
+    Three seek modes:
+
+    ``mode="combined"`` (default, recommended) — ``-ss`` BEFORE ``-i`` to
+        keyframe-seek to ~1s before t_s, then ``-ss`` AFTER ``-i`` to
+        decode forward by exactly that delta. Fast (~0.1-0.3s) AND
+        frame-exact. The pattern most ffmpeg tutorials recommend for
+        thumbnailing.
+
+    ``mode="fast"`` — ``-ss`` before ``-i`` only. Sub-second seek, but
+        lands on a keyframe up to ~1 GOP earlier than t_s (so a 30fps
+        screen recording with GOP=30 might give a frame ~1s before the
+        requested time). This is what we used to use; it's why
+        screenshots looked "off" — the frame at "t=10.5s" was actually
+        from the keyframe at ~t=9.6s.
+
+    ``mode="slow"`` — ``-ss`` after ``-i`` only. Decodes from frame 0 to
+        t_s. Slowest but always exact, including near EOF. Last-resort
+        fallback when combined fails.
 
     Returns ``(ok, stderr_excerpt)``. Never raises.
     """
-    if fast_seek:
+    pre = max(0.0, t_s - _COMBINED_SEEK_PRE_S)
+    delta = t_s - pre
+    common_tail = [
+        "-frames:v", "1",
+        "-vf", "scale='min(1600,iw)':-2",
+        "-q:v", "5",
+        str(out_path),
+    ]
+    if mode == "combined":
+        cmd = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-ss", f"{pre:.3f}",
+            "-i", str(video),
+            "-ss", f"{delta:.3f}",
+            *common_tail,
+        ]
+    elif mode == "fast":
         cmd = [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
             "-ss", f"{t_s:.3f}",
             "-i", str(video),
-            "-frames:v", "1",
-            "-vf", "scale='min(1600,iw)':-2",
-            "-q:v", "5",
-            str(out_path),
+            *common_tail,
+        ]
+    elif mode == "slow":
+        cmd = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-i", str(video),
+            "-ss", f"{t_s:.3f}",
+            *common_tail,
         ]
     else:
-        cmd = [
-            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-            "-i", str(video),
-            "-ss", f"{t_s:.3f}",
-            "-frames:v", "1",
-            "-vf", "scale='min(1600,iw)':-2",
-            "-q:v", "5",
-            str(out_path),
-        ]
+        return False, f"unknown seek mode: {mode!r}"
+
     try:
         result = subprocess.run(  # noqa: S603 — args are not user-controlled
             cmd, capture_output=True, timeout=FFMPEG_CLI_TIMEOUT_S,
@@ -95,20 +129,29 @@ def _ffmpeg_seek_extract(
 
 
 def _run_ffmpeg_cli(video: Path, t_s: float, out_path: Path) -> bool:
-    """CLI fallback used when ``ffmpeg-python`` isn't installed. Tries the
-    fast-seek path first, then the slow exact-seek path before giving up.
+    """CLI fallback used when ``ffmpeg-python`` isn't installed.
+
+    Order: combined (fast + frame-exact) → slow (exact, never misses EOF).
+    Pure fast-seek is no longer used; it lands on the prior keyframe and
+    silently produces frames up to ~1s before the requested time.
     """
-    ok, err_fast = _ffmpeg_seek_extract(video, t_s, out_path, fast_seek=True)
+    ok, err_combined = _ffmpeg_seek_extract(
+        video, t_s, out_path, mode="combined",
+    )
     if ok:
         return True
-    log.debug("ffmpeg fast-seek failed at t=%.2f (%s) — retrying with slow seek",
-              t_s, err_fast)
-    ok, err_slow = _ffmpeg_seek_extract(video, t_s, out_path, fast_seek=False)
+    log.debug(
+        "ffmpeg combined-seek failed at t=%.2f (%s) — retrying with slow seek",
+        t_s, err_combined,
+    )
+    ok, err_slow = _ffmpeg_seek_extract(
+        video, t_s, out_path, mode="slow",
+    )
     if ok:
         return True
     log.info(
-        "ffmpeg cli could not extract frame at t=%.2fs — fast=%r slow=%r",
-        t_s, err_fast, err_slow,
+        "ffmpeg cli could not extract frame at t=%.2fs — combined=%r slow=%r",
+        t_s, err_combined, err_slow,
     )
     return False
 
@@ -123,21 +166,35 @@ def extract_frame(video: Path, t_s: float, out_path: Path) -> Path | None:
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Path A: ffmpeg-python wrapper.
+    # Path A: ffmpeg-python wrapper, using the combined fast+exact seek
+    # pattern. Pre-seek to ~1s before t_s (-ss on input is fast keyframe
+    # seek), then decode forward to the exact delta (-ss on output).
+    # Pure ``ss=t_s`` on the input alone landed on the prior keyframe,
+    # which on screen recordings with GOP=30 silently produced frames
+    # up to ~1s before the requested time.
     py_err: str | None = None
+    pre = max(0.0, t_s - _COMBINED_SEEK_PRE_S)
+    delta = t_s - pre
     try:
         import ffmpeg  # type: ignore
         try:
             (
                 ffmpeg
-                .input(str(video), ss=t_s)
-                .output(str(out_path), vframes=1, vf="scale='min(1600,iw)':-2", **{"q:v": 5})
+                .input(str(video), ss=pre)
+                .output(
+                    str(out_path),
+                    ss=delta,
+                    vframes=1,
+                    vf="scale='min(1600,iw)':-2",
+                    **{"q:v": 5},
+                )
                 .overwrite_output()
                 .run(quiet=True)
             )
             if out_path.exists() and out_path.stat().st_size > 0:
-                log.debug("extracted frame via ffmpeg-python",
+                log.debug("extracted frame via ffmpeg-python (combined seek)",
                           extra={"step": "screenshot", "t_s": t_s,
+                                 "pre": pre, "delta": delta,
                                  "bytes": out_path.stat().st_size})
                 return out_path
             py_err = "ffmpeg-python returned 0 but produced no output"

@@ -511,6 +511,57 @@ async def _generate_structured_insights(
 
 # ─── Step 1.5: enrichment — annotated screenshots + rendered prompts ────────
 
+#: Maximum drift (seconds) between Gemini's emitted timestamp and the
+#: paired event's actual TR time before we log a correction. Above this,
+#: we trust the event's TR time and overwrite the insight's range.
+_TIMESTAMP_DRIFT_TOLERANCE_S: float = 0.5
+
+#: Default duration (seconds) of an insight's time window when we have
+#: to synthesise it from a single TR. Matches TRIBE's TR_DURATION.
+_TR_DURATION_S: float = 1.5
+
+
+def _pair_insights_with_events(
+    insights: list[Insight],
+    events: list[Event],
+) -> list[Event | None]:
+    """Return a list parallel to ``insights`` of the source ``Event`` for
+    each insight (or None if no event can be matched).
+
+    Pairing strategy (in priority order):
+
+    1. **Index mapping** — when ``len(insights) == len(events)``, trust
+       the prompt instruction "one entry per event in the same order".
+       Insight at index i pairs with events[i]. This is the deterministic
+       path; Gemini's emitted timestamps don't enter the picture.
+
+    2. **Nearest-by-timestamp** — when counts diverge (Gemini dropped
+       or merged events), fall back to picking the event whose
+       ``timestamp_s`` is closest to the insight's emitted
+       ``timestamp_range_s[0]``. Within this branch we still log
+       drift to make the divergence visible.
+
+    Either path produces a (insight, event) pairing that downstream
+    enrichment can use to look up the screenshot directly — no more
+    timestamp-keyed dict lookups that silently match the wrong frame
+    when Gemini's timestamps drift.
+    """
+    if not insights or not events:
+        return [None] * len(insights)
+
+    if len(insights) == len(events):
+        return list(events)
+
+    # Counts diverge — fall back to nearest-by-timestamp.
+    paired: list[Event | None] = []
+    for ins in insights:
+        target_t = ins.timestamp_range_s[0]
+        ev = min(events, key=lambda e: abs(e.timestamp_s - target_t),
+                 default=None)
+        paired.append(ev)
+    return paired
+
+
 def _enrich_insights(
     insights: list[Insight],
     events: list[Event],
@@ -518,9 +569,18 @@ def _enrich_insights(
     goal: str | None,
     run_id: str,
 ) -> None:
-    """Mutate insights in place, adding ``annotated_screenshot_b64`` and
-    ``agent_prompt`` fields. CPU-only — runs synchronously off the event
+    """Mutate insights in place, adding the annotated screenshot and the
+    rendered agent prompt. CPU-only — runs synchronously off the event
     loop via ``asyncio.to_thread`` from the orchestrator.
+
+    Pairing is index-based when Gemini emitted one insight per event
+    (the common case); see ``_pair_insights_with_events``. Each insight's
+    timestamp_range_s is OVERWRITTEN with the paired event's
+    deterministic TR time when Gemini's emitted time drifted by more
+    than ``_TIMESTAMP_DRIFT_TOLERANCE_S``. The screenshot lookup uses
+    the paired event's recorded ``screenshot_path`` directly — no more
+    timestamp-keyed dict lookup that silently mismatched the wrong
+    frame when Gemini reordered or duplicated timestamps.
 
     Per-insight failures are non-fatal — a missing overlay or render
     error degrades that one insight but never the whole run.
@@ -528,42 +588,64 @@ def _enrich_insights(
     if not insights:
         return
 
-    # Index events by approximate timestamp so we can locate the source
-    # screenshot for an insight from its timestamp_range_s start.
-    event_by_t: dict[float, Event] = {round(e.timestamp_s, 2): e for e in events}
+    paired_events = _pair_insights_with_events(insights, events)
+    log.info(
+        "synth: enrichment pairing — %d insights, %d events, "
+        "strategy=%s, n_paired=%d",
+        len(insights), len(events),
+        "index" if len(insights) == len(events) else "nearest_by_timestamp",
+        sum(1 for ev in paired_events if ev is not None),
+        extra={"step": "synth.enrich.pair", "run_id": run_id,
+               "n_insights": len(insights), "n_events": len(events)},
+    )
 
     n_annotated = 0
     n_prompts = 0
     n_unclear = 0
-    for idx, ins in enumerate(insights):
-        # Find the source event's screenshot. If we can't, the prompt is
-        # still rendered; only the annotated overlay is dropped.
-        screenshot_path: Path | None = None
-        if ins.target_element is not None and ins.target_element.bbox_norm is not None:
-            t_key = round(ins.timestamp_range_s[0], 2)
-            ev = event_by_t.get(t_key)
-            if ev is None:
-                # Fall back to nearest event
-                ev = min(
-                    events,
-                    key=lambda e: abs(e.timestamp_s - ins.timestamp_range_s[0]),
-                    default=None,
+    n_corrected = 0
+    for idx, (ins, ev) in enumerate(zip(insights, paired_events)):
+        # Step A: lock the insight's timestamp range to the paired event's
+        # canonical TR time. Gemini's emitted timestamps have been observed
+        # to drift / cluster, especially when many events fire close
+        # together; the event timestamps from TRIBE are deterministic.
+        if ev is not None:
+            authoritative_t = round(ev.timestamp_s, 2)
+            authoritative_end = round(ev.timestamp_s + _TR_DURATION_S, 2)
+            drift = abs(ins.timestamp_range_s[0] - authoritative_t)
+            if drift > _TIMESTAMP_DRIFT_TOLERANCE_S:
+                log.warning(
+                    "insight %d had drifted timestamp %.2f vs event %.2f "
+                    "(drift=%.2fs) — correcting to event TR time",
+                    idx, ins.timestamp_range_s[0], authoritative_t, drift,
+                    extra={"step": "synth.enrich.timestamp", "run_id": run_id,
+                           "insight_idx": idx,
+                           "gemini_t": ins.timestamp_range_s[0],
+                           "event_t": authoritative_t,
+                           "drift_s": round(drift, 3)},
                 )
-            if ev is not None and ev.screenshot_path:
-                p = Path(ev.screenshot_path)
-                if p.exists():
-                    screenshot_path = p
+                n_corrected += 1
+            ins.timestamp_range_s = (authoritative_t, authoritative_end)
 
-            if screenshot_path is not None:
+        # Step B: annotated screenshot. Use the paired event's recorded
+        # screenshot_path directly — never re-derive from the insight's
+        # timestamp, which removes a class of silent wrong-frame bugs.
+        if (
+            ev is not None
+            and ev.screenshot_path
+            and ins.target_element is not None
+            and ins.target_element.bbox_norm is not None
+        ):
+            p = Path(ev.screenshot_path)
+            if p.exists():
                 ins.annotated_screenshot_b64 = annotate_to_b64_jpeg(
-                    screenshot_path,
-                    ins.target_element.bbox_norm,
-                    run_id=run_id,
-                    insight_idx=idx,
+                    p, ins.target_element.bbox_norm,
+                    run_id=run_id, insight_idx=idx,
                 )
                 if ins.annotated_screenshot_b64:
                     n_annotated += 1
 
+        # Step C: render the paste-into-agent prompt. Empty string is the
+        # contract for positive moments — frontend hides the copy button.
         try:
             ins.agent_prompt = render_agent_prompt(ins, goal=goal)
             n_prompts += 1
@@ -584,11 +666,13 @@ def _enrich_insights(
 
     log.info(
         "synth: enrichment done — %d/%d annotated, %d/%d prompts rendered, "
-        "%d unclear-branch",
-        n_annotated, len(insights), n_prompts, len(insights), n_unclear,
+        "%d unclear-branch, %d timestamps corrected",
+        n_annotated, len(insights), n_prompts, len(insights),
+        n_unclear, n_corrected,
         extra={"step": "synth.enrich", "run_id": run_id,
                "n_annotated": n_annotated, "n_prompts": n_prompts,
-               "n_unclear": n_unclear, "n_insights": len(insights)},
+               "n_unclear": n_unclear, "n_corrected": n_corrected,
+               "n_insights": len(insights)},
     )
 
 
